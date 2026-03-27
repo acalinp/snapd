@@ -818,6 +818,19 @@ func checkSnapIntegrity(headers map[string]any) ([]IntegrityData, error) {
 	return snapIntegrityDataList, nil
 }
 
+// CheckRevisionHeader checks that the named header is a valid positive revision
+// number (>= 1). For use by external packages that register custom assertion types.
+func CheckRevisionHeader(headers map[string]any, name string) (int, error) {
+	return checkSnapRevisionWhat(headers, name, "header")
+}
+
+// CheckIntegrity parses the optional "integrity" header from the given headers
+// map and returns the corresponding IntegrityData list. For use by external
+// packages that register custom assertion types.
+func CheckIntegrity(headers map[string]any) ([]IntegrityData, error) {
+	return checkSnapIntegrity(headers)
+}
+
 func assembleSnapRevision(assert assertionBase) (Assertion, error) {
 	_, err := checkDigest(assert.headers, "snap-sha3-384", crypto.SHA3_384)
 	if err != nil {

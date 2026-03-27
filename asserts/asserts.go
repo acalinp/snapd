@@ -194,6 +194,35 @@ var typeRegistry = map[string]*AssertionType{
 	ResponseMessageType.Name:      ResponseMessageType,
 }
 
+// AssertionBase is the parsed base of a concrete assertion. External packages
+// that register custom assertion types via RegisterType must embed
+// AssertionBase in their concrete assertion structs and may call its exported
+// methods (HeaderString, Header, Headers, Body, etc.) inside their assembler
+// functions.
+type AssertionBase = assertionBase
+
+// RegisterType registers a custom assertion type so that the asserts package
+// can decode and verify assertions of that type. It panics if a type with the
+// same name is already registered.
+//
+// The assembler function is called with the parsed assertion base and must
+// return the concrete Assertion. Use the exported Check* helper functions from
+// this package to validate headers inside the assembler.
+func RegisterType(name string, primaryKey []string, optPKDefaults map[string]string, assembler func(AssertionBase) (Assertion, error)) *AssertionType {
+	if _, exists := typeRegistry[name]; exists {
+		panic(fmt.Sprintf("assertion type %q already registered", name))
+	}
+	at := &AssertionType{
+		Name:                       name,
+		PrimaryKey:                 primaryKey,
+		OptionalPrimaryKeyDefaults: optPKDefaults,
+		assembler:                  assembler,
+	}
+	at.validate()
+	typeRegistry[name] = at
+	return at
+}
+
 // Type returns the AssertionType with name or nil
 func Type(name string) *AssertionType {
 	return typeRegistry[name]
