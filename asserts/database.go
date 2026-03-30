@@ -28,6 +28,17 @@ import (
 	"time"
 )
 
+// TrustedAssertionClashError is returned by Database.Add when the assertion's
+// primary key clashes with that of a trusted or predefined assertion.
+type TrustedAssertionClashError struct {
+	AssertionTypeName string
+	PrimaryKey        []string
+}
+
+func (e *TrustedAssertionClashError) Error() string {
+	return fmt.Sprintf("cannot add %q assertion with primary key clashing with a trusted or predefined assertion: %v", e.AssertionTypeName, e.PrimaryKey)
+}
+
 // NotFoundError is returned when an assertion can not be found.
 type NotFoundError struct {
 	Type    *AssertionType
@@ -508,12 +519,12 @@ func (db *Database) Add(assert Assertion) error {
 	// know more/better
 	_, err = db.trusted.Get(ref.Type, ref.PrimaryKey, ref.Type.MaxSupportedFormat())
 	if !errors.Is(err, &NotFoundError{}) {
-		return fmt.Errorf("cannot add %q assertion with primary key clashing with a trusted assertion: %v", ref.Type.Name, ref.PrimaryKey)
+		return &TrustedAssertionClashError{AssertionTypeName: ref.Type.Name, PrimaryKey: ref.PrimaryKey}
 	}
 
 	_, err = db.predefined.Get(ref.Type, ref.PrimaryKey, ref.Type.MaxSupportedFormat())
 	if !errors.Is(err, &NotFoundError{}) {
-		return fmt.Errorf("cannot add %q assertion with primary key clashing with a predefined assertion: %v", ref.Type.Name, ref.PrimaryKey)
+		return &TrustedAssertionClashError{AssertionTypeName: ref.Type.Name, PrimaryKey: ref.PrimaryKey}
 	}
 
 	// this is non empty only in the stacked case
