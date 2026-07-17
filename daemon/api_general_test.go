@@ -33,6 +33,7 @@ import (
 	"gopkg.in/check.v1"
 
 	"github.com/snapcore/snapd/arch"
+	"github.com/snapcore/snapd/asserts"
 	"github.com/snapcore/snapd/boot"
 	"github.com/snapcore/snapd/daemon"
 	"github.com/snapcore/snapd/dirs"
@@ -40,12 +41,19 @@ import (
 	"github.com/snapcore/snapd/features"
 	"github.com/snapcore/snapd/interfaces"
 	"github.com/snapcore/snapd/interfaces/ifacetest"
+	"github.com/snapcore/snapd/overlord/assertstate/assertstatetest"
 	"github.com/snapcore/snapd/overlord/auth"
 	"github.com/snapcore/snapd/overlord/configstate/config"
+	"github.com/snapcore/snapd/overlord/devicestate"
 	"github.com/snapcore/snapd/overlord/fdestate"
+	"github.com/snapcore/snapd/overlord/hookstate"
+	"github.com/snapcore/snapd/overlord/hookstate/ctlcmd"
+	"github.com/snapcore/snapd/overlord/install"
+	"github.com/snapcore/snapd/overlord/snapstate"
 	"github.com/snapcore/snapd/overlord/state"
 	"github.com/snapcore/snapd/release"
 	"github.com/snapcore/snapd/sandbox"
+	"github.com/snapcore/snapd/snap"
 	"github.com/snapcore/snapd/systemd"
 )
 
@@ -190,16 +198,6 @@ func (s *generalSuite) TestSysInfo(c *check.C) {
 	// Check that "features" is map
 	featuresAll, ok := resultFeatures.(map[string]any)
 	c.Assert(ok, check.Equals, true)
-	// Ensure that Layouts exists and is feature.FeatureInfo
-	layoutsInfoRaw, exists := featuresAll[features.Layouts.String()]
-	c.Assert(exists, check.Equals, true)
-	layoutsInfo, ok := layoutsInfoRaw.(map[string]any)
-	c.Assert(ok, check.Equals, true, check.Commentf("%+v", layoutsInfoRaw))
-	// Ensure that Layouts is supported and enabled
-	c.Check(layoutsInfo["supported"], check.Equals, true)
-	_, exists = layoutsInfo["unsupported-reason"]
-	c.Check(exists, check.Equals, false)
-	c.Check(layoutsInfo["enabled"], check.Equals, true)
 	// Ensure that ParallelInstances exists and is a feature.FeatureInfo
 	parallelInstancesInfoRaw, exists := featuresAll[features.ParallelInstances.String()]
 	c.Assert(exists, check.Equals, true)
@@ -950,9 +948,9 @@ func (s *generalSuite) TestStateChangesForSnapName(c *check.C) {
 
 	// Verify
 	c.Check(rsp.Status, check.Equals, 200)
-	c.Assert(rsp.Result, check.FitsTypeOf, []*daemon.ChangeInfo(nil))
+	c.Assert(rsp.Result, check.FitsTypeOf, []*ctlcmd.ChangeInfo(nil))
 
-	res := rsp.Result.([]*daemon.ChangeInfo)
+	res := rsp.Result.([]*ctlcmd.ChangeInfo)
 	c.Assert(res, check.HasLen, 1)
 	c.Check(res[0].Kind, check.Equals, `install`)
 
@@ -986,9 +984,9 @@ func (s *generalSuite) TestStateChangesForSnapNameWithApp(c *check.C) {
 
 	// Verify
 	c.Check(rsp.Status, check.Equals, 200)
-	c.Assert(rsp.Result, check.FitsTypeOf, []*daemon.ChangeInfo(nil))
+	c.Assert(rsp.Result, check.FitsTypeOf, []*ctlcmd.ChangeInfo(nil))
 
-	res := rsp.Result.([]*daemon.ChangeInfo)
+	res := rsp.Result.([]*ctlcmd.ChangeInfo)
 	c.Assert(res, check.HasLen, 1)
 	c.Check(res[0].Kind, check.Equals, `service-control`)
 
@@ -997,6 +995,8 @@ func (s *generalSuite) TestStateChangesForSnapNameWithApp(c *check.C) {
 	c.Assert(rec.Code, check.Equals, 200)
 }
 
+// This test relies on ctlcmd.StateChangeToChangeInfo(), which was moved from
+// the daemon package to the ctlcmd package.
 func (s *generalSuite) TestStateChange(c *check.C) {
 	restore := state.MockTime(time.Date(2016, 04, 21, 1, 2, 3, 0, time.UTC))
 	defer restore()
@@ -1006,27 +1006,26 @@ func (s *generalSuite) TestStateChange(c *check.C) {
 	d := s.daemon(c)
 	st := d.Overlord().State()
 	st.Lock()
-	ids := setupChanges(st)
-	chg := st.Change(ids[0])
-	chg.Set("api-data", map[string]int{"n": 42})
+
+	chg1 := st.NewChange("install", "install...")
+	chg1.Set("snap-names", []string{"funky-snap-name"})
+	t1 := st.NewTask("download", "1...")
+	t1.Set("snap-setup", &snapstate.SnapSetup{SideInfo: &snap.SideInfo{RealName: "some-snap"}})
+	chg1.AddTask(t1)
+	t1.Logf("l11")
+	t1.Logf("l12")
+
+	t2 := st.NewTask("activate", "2...")
+	chg1.AddTask(t2)
+	// Setting 'snap-setup' to something that cant be parsed allows us to test that missing data is ignored
+	// and doesn't cause the whole task to be missing from the output
+	t2.Set("snap-setup", "some-snap")
+
+	chg1.Set("api-data", map[string]int{"n": 42})
 	st.Unlock()
 
-	restore = daemon.MockSnapstateSnapsAffectedByTask(func(t *state.Task) ([]string, error) {
-		switch t.Kind() {
-		case "download":
-			// Mock affected snaps
-			return []string{"some-snap"}, nil
-		case "activate":
-			// Error should be ignored
-			return nil, fmt.Errorf("boom")
-		default:
-			return nil, nil
-		}
-	})
-	defer restore()
-
 	// Execute
-	req, err := http.NewRequest("GET", "/v2/changes/"+ids[0], nil)
+	req, err := http.NewRequest("GET", "/v2/changes/"+chg1.ID(), nil)
 	c.Assert(err, check.IsNil)
 	rsp := s.syncReq(c, req, nil, actionIsExpected)
 	rec := httptest.NewRecorder()
@@ -1041,7 +1040,7 @@ func (s *generalSuite) TestStateChange(c *check.C) {
 	err = json.Unmarshal(rec.Body.Bytes(), &body)
 	c.Check(err, check.IsNil)
 	c.Check(body["result"], check.DeepEquals, map[string]any{
-		"id":         ids[0],
+		"id":         chg1.ID(),
 		"kind":       "install",
 		"summary":    "install...",
 		"status":     "Do",
@@ -1049,7 +1048,7 @@ func (s *generalSuite) TestStateChange(c *check.C) {
 		"spawn-time": "2016-04-21T01:02:03Z",
 		"tasks": []any{
 			map[string]any{
-				"id":         ids[2],
+				"id":         t1.ID(),
 				"kind":       "download",
 				"summary":    "1...",
 				"status":     "Do",
@@ -1059,7 +1058,7 @@ func (s *generalSuite) TestStateChange(c *check.C) {
 				"data":       map[string]any{"affected-snaps": []any{"some-snap"}},
 			},
 			map[string]any{
-				"id":         ids[3],
+				"id":         t2.ID(),
 				"kind":       "activate",
 				"summary":    "2...",
 				"status":     "Do",
@@ -1232,9 +1231,8 @@ func (s *generalSuite) TestAckWarnings(c *check.C) {
 	c.Check(result, check.DeepEquals, 0)
 }
 
-func (s *generalSuite) TestSysInfoStorageEncHappy(c *check.C) {
+func (s *generalSuite) TestSysInfoStorageEncHappyWithoutModel(c *check.C) {
 	s.daemon(c)
-	s.expectSystemInfoStorageEncReadAccess()
 
 	expectedStatus := ""
 	expectedResponse := map[string]any{}
@@ -1242,16 +1240,130 @@ func (s *generalSuite) TestSysInfoStorageEncHappy(c *check.C) {
 	setExpectedStatus := func(status string) {
 		expectedStatus = status
 		expectedResponse["status"] = status
+		expectedResponse["auto-repair-result"] = "not-initialized"
+		expectedResponse["preinstall"] = map[string]any{
+			"requirements":    []any{},
+			"accepted-errors": map[string]any{},
+		}
 	}
 
-	defer daemon.MockFdestateSystemState(func(*state.State) (*fdestate.FDESystemState, error) {
+	defer daemon.MockFdestateSystemState(func(s *state.State, model *asserts.Model) (*fdestate.FDESystemState, error) {
 		switch expectedStatus {
 		case "active":
-			return &fdestate.FDESystemState{Status: fdestate.FDEStatusActive}, nil
+			return &fdestate.FDESystemState{
+				Status:           fdestate.FDEStatusActive,
+				AutoRepairResult: fdestate.AutoRepairNotInitialized,
+				Preinstall: fdestate.FDEPreinstallInfo{
+					Requirements:   []install.EncryptionSupportRequirement{},
+					AcceptedErrors: map[string]any{},
+				},
+			}, nil
 
 		case "inactive":
-			return &fdestate.FDESystemState{Status: fdestate.FDEStatusInactive}, nil
+			return &fdestate.FDESystemState{
+				Status:           fdestate.FDEStatusInactive,
+				AutoRepairResult: fdestate.AutoRepairNotInitialized,
+				Preinstall: fdestate.FDEPreinstallInfo{
+					Requirements:   []install.EncryptionSupportRequirement{},
+					AcceptedErrors: map[string]any{},
+				},
+			}, nil
 		}
+
+		c.Check(model, check.IsNil)
+
+		return nil, errors.New("cannot set unsupported expected status")
+	})()
+
+	req, err := http.NewRequest("GET", "/v2/system-info/storage-encrypted", nil)
+	c.Assert(err, check.IsNil)
+
+	setExpectedStatus("active")
+	rsp := s.syncReq(c, req, nil, actionIsExpected)
+	c.Check(rsp.Status, check.Equals, 200)
+	c.Check(rsp.Type, check.Equals, daemon.ResponseTypeSync)
+	resultBytes, err := json.Marshal(rsp.Result)
+	c.Assert(err, check.IsNil)
+	var resultAbstract any
+	err = json.Unmarshal(resultBytes, &resultAbstract)
+	c.Assert(err, check.IsNil)
+	c.Check(resultAbstract, check.DeepEquals, expectedResponse)
+
+	setExpectedStatus("inactive")
+	rsp = s.syncReq(c, req, nil, actionIsExpected)
+	c.Assert(err, check.IsNil)
+	resultBytes, err = json.Marshal(rsp.Result)
+	c.Assert(err, check.IsNil)
+	err = json.Unmarshal(resultBytes, &resultAbstract)
+	c.Assert(err, check.IsNil)
+	c.Check(resultAbstract, check.DeepEquals, expectedResponse)
+}
+
+func (s *generalSuite) TestSysInfoStorageEncHappyWithModel(c *check.C) {
+	d := s.daemonWithOverlordMockAndStore()
+	s.expectSystemInfoStorageEncReadAccess()
+
+	hookMgr, err := hookstate.Manager(d.Overlord().State(), d.Overlord().TaskRunner())
+	c.Assert(err, check.IsNil)
+	deviceMgr, err := devicestate.Manager(d.Overlord().State(), hookMgr, d.Overlord().TaskRunner(), nil)
+	c.Assert(err, check.IsNil)
+	d.Overlord().AddManager(deviceMgr)
+	func() {
+		st := d.Overlord().State()
+		st.Lock()
+		defer st.Unlock()
+		assertstatetest.AddMany(st, s.StoreSigning.StoreAccountKey(""))
+		assertstatetest.AddMany(st, s.Brands.AccountsAndKeys("my-brand")...)
+		s.mockModel(st, s.Brands.Model("my-brand", "my-model", map[string]any{
+			"architecture": "amd64",
+			"gadget":       "gadget",
+			"kernel":       "kernel",
+		}))
+	}()
+
+	expectedStatus := ""
+	expectedResponse := map[string]any{}
+
+	setExpectedStatus := func(status string) {
+		expectedStatus = status
+		expectedResponse["status"] = status
+		expectedResponse["auto-repair-result"] = "not-initialized"
+		expectedResponse["preinstall"] = map[string]any{
+			"requirements": []any{"volumes-auth"},
+			"accepted-errors": map[string]any{
+				"no-hardware-root-of-trust": nil,
+			},
+		}
+	}
+
+	defer daemon.MockFdestateSystemState(func(s *state.State, model *asserts.Model) (*fdestate.FDESystemState, error) {
+		switch expectedStatus {
+		case "active":
+			return &fdestate.FDESystemState{
+				Status:           fdestate.FDEStatusActive,
+				AutoRepairResult: fdestate.AutoRepairNotInitialized,
+				Preinstall: fdestate.FDEPreinstallInfo{
+					Requirements: []install.EncryptionSupportRequirement{"volumes-auth"},
+					AcceptedErrors: map[string]any{
+						"no-hardware-root-of-trust": nil,
+					},
+				},
+			}, nil
+
+		case "inactive":
+			return &fdestate.FDESystemState{
+				Status:           fdestate.FDEStatusInactive,
+				AutoRepairResult: fdestate.AutoRepairNotInitialized,
+				Preinstall: fdestate.FDEPreinstallInfo{
+					Requirements: []install.EncryptionSupportRequirement{"volumes-auth"},
+					AcceptedErrors: map[string]any{
+						"no-hardware-root-of-trust": nil,
+					},
+				},
+			}, nil
+		}
+
+		c.Check(model, check.NotNil)
 
 		return nil, errors.New("cannot set unsupported expected status")
 	})()
@@ -1283,7 +1395,7 @@ func (s *generalSuite) TestSysInfoStorageEncHappy(c *check.C) {
 func (s *generalSuite) TestSysInfoStorageEncErrorImpl(c *check.C) {
 	s.daemon(c)
 
-	defer daemon.MockFdestateSystemState(func(*state.State) (*fdestate.FDESystemState, error) {
+	defer daemon.MockFdestateSystemState(func(*state.State, *asserts.Model) (*fdestate.FDESystemState, error) {
 		return nil, errors.New("cannot calculate status")
 	})()
 

@@ -78,6 +78,9 @@ func init() {
 
 	// interface.*.allow-auto-connection
 	addWithStateHandler(validateAllowAutoConnectionValue, nil, &flags{validatedOnlyStateConfig: true})
+
+	// pki.certs.custom.*
+	addWithStateHandler(validateCustomCertificateRequest, handleCustomCertificateRequest, &flags{coreOnlyConfig: true})
 }
 
 // RunTransaction is an interface describing how to access
@@ -168,12 +171,22 @@ func applyHandlers(dev sysconfig.Device, cfg RunTransaction, handlers []configHa
 			if !validCertOption(k) {
 				return fmt.Errorf("cannot set store ssl certificate under name %q: name must only contain word characters or a dash", k)
 			}
+		case strings.HasPrefix(k, "core."+customCertPrefix+"."):
+			// validated by validateCustomCertificateRequest
 		case isNetplanChange(k):
 			if release.OnClassic {
 				return fmt.Errorf("cannot set netplan configuration on classic")
 			}
 		case isInterfaceChange(k):
 			if err := validateInterfaceChange(k); err != nil {
+				return err
+			}
+		case isDefaultEnabledExperimentalChange(k):
+			if err := warnDefaultEnabledExperimentalChange(cfg, k); err != nil {
+				return err
+			}
+		case isGraduatedExperimentalChange(k):
+			if err := dropGraduatedExperimentalChange(cfg, k); err != nil {
 				return err
 			}
 		case !supportedConfigurations[k]:

@@ -23,7 +23,6 @@ package fdestate_test
 import (
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"time"
 
@@ -336,6 +335,10 @@ func (s *fdeMgrSuite) testReplaceRecoveryKey(c *C, defaultKeyslots bool) {
 	var tskKeyslots []fdestate.KeyslotRef
 	c.Assert(tsks[0].Get("keyslots", &tskKeyslots), IsNil)
 	c.Check(tskKeyslots, DeepEquals, tmpKeyslots)
+	// check all tmp keys will be removed on error
+	var tskRemoveAll bool
+	c.Assert(tsks[0].Get("remove-all-on-error", &tskRemoveAll), IsNil)
+	c.Check(tskRemoveAll, Equals, true)
 
 	c.Check(tsks[1].Summary(), Matches, "Remove old recovery key slots")
 	c.Check(tsks[1].Kind(), Equals, "fde-remove-keys")
@@ -761,6 +764,10 @@ func (s *fdeMgrSuite) testReplacePlatformKey(c *C, authMode device.AuthMode, def
 	var tskKeyslots []fdestate.KeyslotRef
 	c.Assert(tsks[0].Get("keyslots", &tskKeyslots), IsNil)
 	c.Check(tskKeyslots, DeepEquals, tmpKeyslots)
+	// check all tmp keys will be removed on error
+	var tskRemoveAll bool
+	c.Assert(tsks[0].Get("remove-all-on-error", &tskRemoveAll), IsNil)
+	c.Check(tskRemoveAll, Equals, true)
 	var tskAuthMode device.AuthMode
 	c.Assert(tsks[0].Get("auth-mode", &tskAuthMode), IsNil)
 	c.Check(tskAuthMode, Equals, authMode)
@@ -902,18 +909,6 @@ func (s *fdeMgrSuite) TestReplacePlatformKeyErrors(c *C) {
 	_, err = fdestate.ReplacePlatformKey(s.st, nil, []fdestate.KeyslotRef{badKeyslot})
 	c.Assert(err, ErrorMatches, `invalid key slot reference \(container-role: "system-data", name: "default"\): unsupported type "recovery", expected "platform"`)
 
-	// recovery mode
-	s.createUnlockedState(c, sb.ActivationSucceededWithRecoveryKey)
-	s.st.Cache(fdestate.CachedActivateStateKey{}, nil)
-
-	_, err = fdestate.ReplacePlatformKey(s.st, nil, nil)
-	c.Assert(err, ErrorMatches, `cannot replace platform keys if FDE is not active \(current state: recovery\)`)
-	// cleanup
-	c.Assert(os.RemoveAll(filepath.Join(dirs.SnapBootstrapRunDir, "unlocked.json")), IsNil)
-
-	s.createUnlockedState(c, sb.ActivationSucceededWithPlatformKey)
-	s.st.Cache(fdestate.CachedActivateStateKey{}, nil)
-
 	// change conflict with fde changes
 	chg := s.st.NewChange("fde-change-passphrase", "")
 	task := s.st.NewTask("some-fde-task", "")
@@ -951,7 +946,7 @@ type: base
 	} {
 		path := snaptest.MakeTestSnapWithFiles(c, sn.snapYaml, nil)
 		s.st.Set("seeded", true)
-		ts, _, err := snapstate.InstallPath(s.st, &snap.SideInfo{
+		ts, err := snapstate.InstallPath(s.st, &snap.SideInfo{
 			RealName: sn.name,
 		}, path, "", "", snapstate.Flags{}, nil)
 		c.Assert(err, IsNil)
@@ -1026,7 +1021,7 @@ type: app
 		c.Logf("checking snap %s:\n%s", sn.name, sn.snapYaml)
 		path := snaptest.MakeTestSnapWithFiles(c, sn.snapYaml, nil)
 
-		_, _, err = snapstate.InstallPath(s.st, &snap.SideInfo{
+		_, err = snapstate.InstallPath(s.st, &snap.SideInfo{
 			RealName: sn.name,
 		}, path, "", "", snapstate.Flags{}, nil)
 

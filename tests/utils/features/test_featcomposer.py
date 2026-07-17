@@ -25,8 +25,9 @@ class TestCompose(unittest.TestCase):
         features['endpoints'] = [Endpoint(method='POST', path=msg)]
         features['interfaces'] = [Interface(name=msg)]
         features['tasks'] = [
-            Task(kind=msg, snap_type='snap', last_status=Status.done)]
+            Task(kind=msg, snap_type='snap', last_status=Status.done.value)]
         features['changes'] = [Change(kind=msg, snap_type='snap')]
+        features['coverages'] = [Coverage(file=f'{msg}.go', func=msg)]
         return features
 
     @staticmethod
@@ -41,7 +42,8 @@ class TestCompose(unittest.TestCase):
             endpoints=features['endpoints'],
             interfaces=features['interfaces'],
             tasks=features['tasks'],
-            changes=features['changes']
+            changes=features['changes'],
+            coverages=features['coverages']
         )
 
     @staticmethod
@@ -80,18 +82,18 @@ class TestCompose(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             res = os.path.join(tmpdir, 'res')
             os.mkdir(res)
-            sys1test1 = TestCompose.get_features('sys1test1')
-            sys1test2 = TestCompose.get_features('sys1test2')
-            sys2test1 = TestCompose.get_features('sys2test1')
-            sys2test3 = TestCompose.get_features('sys2test3')
+            sys1test1 = TestCompose.get_json('tests/main', 'test1', '', False, 'sys1test1')
+            sys1test2 = TestCompose.get_json('tests/main', 'test2', 'variant1', False, 'sys1test2')
+            sys2test1 = TestCompose.get_json('tests/main', 'test1', '', True, 'sys2test1')
+            sys2test3 = TestCompose.get_json('tests/main', 'test3', '', False, 'sys2test3')
 
-            with open(os.path.join(res, 'backend:system1:tests--test1'), mode='w', encoding='utf-8') as f:
+            with open(os.path.join(res, 'backend:system1:tests--main--test1'), mode='w', encoding='utf-8') as f:
                 json.dump(sys1test1, f)
-            with open(os.path.join(res, 'backend:system1:tests--test2:variant1'), mode='w', encoding='utf-8') as f:
+            with open(os.path.join(res, 'backend:system1:tests--main--test2:variant1'), mode='w', encoding='utf-8') as f:
                 json.dump(sys1test2, f)
-            with open(os.path.join(res, 'backend:system2:tests--test1'), mode='w', encoding='utf-8') as f:
+            with open(os.path.join(res, 'backend:system2:tests--main--test1'), mode='w', encoding='utf-8') as f:
                 json.dump(sys2test1, f)
-            with open(os.path.join(res, 'backend:system2:tests--test3'), mode='w', encoding='utf-8') as f:
+            with open(os.path.join(res, 'backend:system2:tests--main--test3'), mode='w', encoding='utf-8') as f:
                 json.dump(sys2test3, f)
             out = os.path.join(tmpdir, 'out')
             os.mkdir(out)
@@ -130,6 +132,44 @@ class TestCompose(unittest.TestCase):
                     if test['task_name'] == 'test3':
                         check_test_equal(sys2test3, test, False)
 
+    def test_coverage_preservation(self):
+        """Test that coverage data is preserved during composition"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Create test files with coverage data
+            test_file = os.path.join(tmpdir, 'backend:system1:tests--main--test1')
+            test_data = {
+                'suite': 'tests/main',
+                'task_name': 'test1',
+                'variant': '',
+                'success': True,
+                'cmds': [],
+                'endpoints': [],
+                'interfaces': [],
+                'tasks': [],
+                'changes': [],
+                'ensures': [],
+                'coverages': [
+                    {'file': 'core/overlord/snapstate.go', 'func': 'doInstall'},
+                    {'file': 'core/daemon/api.go', 'func': 'handleGet'},
+                ]
+            }
+            with open(test_file, 'w', encoding='utf-8') as f:
+                json.dump(test_data, f)
+            
+            systems = featcomposer.get_system_list(tmpdir)
+            self.assertEqual(1, len(systems))
+            composed = featcomposer.compose_system(tmpdir, systems.pop(),
+                                                       'backend:system1:tests/main/test1',
+                                                       [], [])
+            
+            # Verify coverage data is present in composed output
+            assert 'tests' in composed and len(composed['tests']) == 1
+            test = composed['tests'][0]
+            assert 'coverages' in test
+            assert len(test['coverages']) == 2
+            assert {'file': 'core/overlord/snapstate.go', 'func': 'doInstall'} in test['coverages']
+            assert {'file': 'core/daemon/api.go', 'func': 'handleGet'} in test['coverages']
+
 
 class TestReplace(unittest.TestCase):
 
@@ -141,7 +181,8 @@ class TestReplace(unittest.TestCase):
             original_json = {'system.version': 'my:system.version', 'tests': [{'task_name': 'task1', 'suite': 'my/suite', 'variant': '', 'success': False, 'cmds': [{'cmd': 'original run'}]},
                                                               {'task_name': 'task2', 'suite': 'my/suite', 'variant': '', 'success': True, 'cmds': [{'cmd': 'original run'}]}]}
             rerun_json = {'system.version': 'my:system.version', 'tests': [
-                {'task_name': 'task1', 'suite': 'my/suite', 'variant': '', 'success': True, 'cmds': [{'cmd': 'rerun 1'}, {'cmd': 'another'}]}]}
+                {'task_name': 'task1', 'suite': 'my/suite', 'variant': '', 'success': True, 'cmds': [{'cmd': 'rerun 1'}, {'cmd': 'another'}]},
+                {'task_name': 'task3', 'suite': 'my/suite', 'variant': '', 'success': True, 'cmds': [{'cmd': 'rerun 2'}]}]}
             run_once_json = {'system.version': 'my:other-system.version', 'tests': [
                 {'task_name': 'task', 'suite': 'my/suite', 'variant': 'v1', 'success': True}]}
             with open(original, 'w') as f:
@@ -160,9 +201,10 @@ class TestReplace(unittest.TestCase):
                 actual = json.load(f)
                 assert len(actual) == 2
                 assert 'system.version' in actual and actual['system.version'] == 'my:system.version'
-                assert 'tests' in actual and len(actual['tests']) == 2
+                assert 'tests' in actual and len(actual['tests']) == 3
                 assert {'task_name': 'task1', 'suite': 'my/suite', 'variant': '', 'success': True, 'cmds': [{'cmd': 'rerun 1'}, {'cmd': 'another'}]} in actual['tests']
                 assert {'task_name': 'task2', 'suite': 'my/suite', 'variant': '', 'success': True, 'cmds': [{'cmd': 'original run'}]} in actual['tests']
+                assert {'task_name': 'task3', 'suite': 'my/suite', 'variant': '', 'success': True, 'cmds': [{'cmd': 'rerun 2'}]} in actual['tests']
             with open(os.path.join(tmpdir, output_dir, 'my:other-system.version.json'), 'r') as f:
                 actual = json.load(f)
                 assert len(actual) == 2

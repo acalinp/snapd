@@ -127,6 +127,16 @@ type RecoveryAwareBootloader interface {
 	GetRecoverySystemEnv(recoverySystemDir string, key string) (string, error)
 }
 
+// RecoveryBootConfigBootloader can explicitly regenerate recovery boot
+// configuration files from the currently persisted bootloader state.
+type RecoveryBootConfigBootloader interface {
+	Bootloader
+
+	// Reconfigure rebuilds the bootloader recovery
+	// configuration using the current boot variables and on-disk state.
+	Reconfigure() error
+}
+
 type ExtractedRecoveryKernelImageBootloader interface {
 	Bootloader
 	ExtractRecoveryKernelAssets(recoverySystemDir string, s snap.PlaceInfo, snapf snap.Container) error
@@ -245,7 +255,7 @@ type TrustedAssetsBootloader interface {
 	BootChains(runBl Bootloader, kernelPath string) ([][]BootFile, error)
 
 	// RevocationTriggeringAssets provides the identifiers
-	// for assets that want revocation of keys on update.
+	// for assets that want revocation of older FDE sealed keys on update.
 	// The identifiers correspond to identifiers used in the
 	// modeenv (CurrentTrustedBootAssets and
 	// CurrentTrustedRecoveryBootAssets).

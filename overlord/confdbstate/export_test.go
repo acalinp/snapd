@@ -24,6 +24,7 @@ import (
 	"github.com/snapcore/snapd/confdb"
 	"github.com/snapcore/snapd/overlord/hookstate"
 	"github.com/snapcore/snapd/overlord/state"
+	"github.com/snapcore/snapd/testutil"
 )
 
 var (
@@ -39,13 +40,8 @@ var (
 
 type (
 	ConfdbTransactions = confdbTransactions
-	PendingAccess      = pendingAccess
+	Access             = access
 	AccessType         = accessType
-)
-
-const (
-	CommitEdge  = commitEdge
-	ClearTxEdge = clearTxEdge
 )
 
 func ChangeViewHandlerGenerator(ctx *hookstate.Context) hookstate.Handler {
@@ -57,45 +53,44 @@ func SaveViewHandlerGenerator(ctx *hookstate.Context) hookstate.Handler {
 }
 
 func MockReadDatabag(f func(st *state.State, account, confdbName string) (confdb.JSONDatabag, error)) func() {
-	old := readDatabag
-	readDatabag = f
-	return func() {
-		readDatabag = old
-	}
+	return testutil.Mock(&readDatabag, f)
 }
 
 func MockWriteDatabag(f func(st *state.State, databag confdb.JSONDatabag, account, confdbName string) error) func() {
-	old := writeDatabag
-	writeDatabag = f
-	return func() {
-		writeDatabag = old
-	}
+	return testutil.Mock(&writeDatabag, f)
 }
 
 func MockEnsureNow(f func(*state.State)) func() {
-	old := ensureNow
-	ensureNow = f
-	return func() {
-		ensureNow = old
-	}
+	return testutil.Mock(&ensureNow, f)
 }
 
 func MockTransactionTimeout(dur time.Duration) func() {
-	old := transactionTimeout
-	transactionTimeout = dur
-	return func() {
-		transactionTimeout = old
-	}
+	return testutil.Mock(&transactionTimeout, dur)
 }
 
 func MockDefaultWaitTimeout(dur time.Duration) func() {
-	old := defaultWaitTimeout
-	defaultWaitTimeout = dur
-	return func() {
-		defaultWaitTimeout = old
-	}
+	return testutil.Mock(&defaultWaitTimeout, dur)
 }
 
-func SetBlockingSignalChan(signalChan chan struct{}) {
-	blockingSignalChan = signalChan
+func SetBlockingSignal(key string, signalChan chan struct{}) {
+	if blockingSignals == nil {
+		blockingSignals = make(map[string]chan struct{})
+	}
+	blockingSignals[key] = signalChan
+}
+
+func ResetBlockingSignals() {
+	blockingSignals = nil
+}
+
+func MaybeUnblockAccesses(txs *confdbTransactions) {
+	maybeUnblockAccesses(txs)
+}
+
+func GetOngoingTxs(st *state.State, account, schemaName string) (ongoingTxs *confdbTransactions, updateTxStateFunc func(*confdbTransactions), err error) {
+	return getOngoingTxs(st, account, schemaName)
+}
+
+func MockFetchConfdbSchemaAssertion(f func(*state.State, int, string, string) error) func() {
+	return testutil.Mock(&AssertstateFetchConfdbSchemaAssertion, f)
 }

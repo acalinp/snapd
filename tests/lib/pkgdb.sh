@@ -150,7 +150,6 @@ distro_install_package() {
         # reason, disable weak deps altogether.
         DNF_FLAGS="--setopt=install_weak_deps=False"
     fi
-    YUM_FLAGS=
     ZYPPER_FLAGS=
     while [ -n "$1" ]; do
         case "$1" in
@@ -195,11 +194,6 @@ distro_install_package() {
             apt update
             # shellcheck disable=SC2086
             quiet eatmydata apt-get install $APT_FLAGS -y "${pkg_names[@]}"
-            retval=$?
-            ;;
-        amazon-linux-2-*)
-            # shellcheck disable=SC2086
-            quiet yum -y install $YUM_FLAGS "${pkg_names[@]}"
             retval=$?
             ;;
         fedora-*|centos-*|amazon-linux-2023-*)
@@ -681,6 +675,7 @@ pkg_dependencies_ubuntu_classic(){
                 qemu-system
                 qemu-utils
                 systemd-dev
+                linux-modules-zfs-generic
                 "
             ;;
         ubuntu-*)
@@ -706,6 +701,7 @@ pkg_dependencies_ubuntu_classic(){
                 net-tools
                 packagekit
                 sbuild
+                sbuild-schroot
                 schroot
                 strace
                 systemd-timesyncd
@@ -859,6 +855,7 @@ pkg_dependencies_opensuse(){
         clang
         curl
         dbus-1-python3
+        dbus-1-tools
         evolution-data-server
         expect
         fish
@@ -885,6 +882,7 @@ pkg_dependencies_opensuse(){
         udisks2
         upower
         uuidd
+        xdelta3
         xdg-user-dirs
         xdg-utils
         zsh

@@ -223,7 +223,7 @@ func (s *sideloadSuite) sideloadCheck(c *check.C, content string, head map[strin
 		return []*snap.Info{{}}, []*state.TaskSet{state.NewTaskSet(t)}, nil
 	})()
 
-	defer daemon.MockSnapstateInstallPath(func(s *state.State, si *snap.SideInfo, path, name, channel string, flags snapstate.Flags, prqt snapstate.PrereqTracker) (*state.TaskSet, *snap.Info, error) {
+	defer daemon.MockSnapstateInstallPath(func(s *state.State, si *snap.SideInfo, path, name, channel string, flags snapstate.Flags, prqt snapstate.PrereqTracker) (*state.TaskSet, error) {
 		c.Check(flags, check.DeepEquals, expectedFlags)
 
 		c.Check(path, testutil.FileEquals, "xyzzy")
@@ -232,7 +232,7 @@ func (s *sideloadSuite) sideloadCheck(c *check.C, content string, head map[strin
 
 		installQueue = append(installQueue, si.RealName+"::"+path)
 		t := s.NewTask("fake-install-snap", "Doing a fake install")
-		return state.NewTaskSet(t), &snap.Info{SuggestedName: name}, nil
+		return state.NewTaskSet(t), nil
 	})()
 
 	buf := bytes.NewBufferString(content)
@@ -1059,7 +1059,7 @@ version: 1`, nil)
 	c.Assert(err, check.IsNil)
 	req.Header.Set("Content-Type", "multipart/thing; boundary=--hello--")
 
-	defer daemon.MockSnapstateInstallPath(func(s *state.State, si *snap.SideInfo, path, name, channel string, flags snapstate.Flags, prqt snapstate.PrereqTracker) (*state.TaskSet, *snap.Info, error) {
+	defer daemon.MockSnapstateInstallPath(func(s *state.State, si *snap.SideInfo, path, name, channel string, flags snapstate.Flags, prqt snapstate.PrereqTracker) (*state.TaskSet, error) {
 		c.Check(flags, check.Equals, snapstate.Flags{RemoveSnapPath: true, Transaction: client.TransactionPerSnap})
 		c.Check(si, check.DeepEquals, &snap.SideInfo{
 			RealName: "foo",
@@ -1067,7 +1067,7 @@ version: 1`, nil)
 			Revision: snap.R(41),
 		})
 
-		return state.NewTaskSet(), &snap.Info{SuggestedName: "foo"}, nil
+		return state.NewTaskSet(), nil
 	})()
 
 	rsp := s.asyncReq(c, req, nil, actionIsExpected)
@@ -1154,8 +1154,8 @@ func (s *sideloadSuite) TestSideloadSnapChangeConflict(c *check.C) {
 		return &snap.Info{SuggestedName: "foo"}, nil
 	})()
 
-	defer daemon.MockSnapstateInstallPath(func(s *state.State, si *snap.SideInfo, path, name, channel string, flags snapstate.Flags, prqt snapstate.PrereqTracker) (*state.TaskSet, *snap.Info, error) {
-		return nil, nil, &snapstate.ChangeConflictError{Snap: "foo"}
+	defer daemon.MockSnapstateInstallPath(func(s *state.State, si *snap.SideInfo, path, name, channel string, flags snapstate.Flags, prqt snapstate.PrereqTracker) (*state.TaskSet, error) {
+		return nil, &snapstate.ChangeConflictError{Snap: "foo"}
 	})()
 
 	req, err := http.NewRequest("POST", "/v2/snaps", bytes.NewBufferString(body))
@@ -1286,21 +1286,21 @@ func (s *sideloadSuite) TestSideloadExceedMemoryLimit(c *check.C) {
 
 	// check that there's a memory limit for the sum of the parts, not just each
 	bufs := make([][]byte, 2)
-	var body string
+	var body strings.Builder
 
 	for i := range bufs {
 		bufs[i] = make([]byte, daemon.MaxReadBuflen/2+1)
 		_, err := rand.Read(bufs[i])
 		c.Assert(err, check.IsNil)
 
-		body += "--foo\r\n" +
+		body.WriteString("--foo\r\n" +
 			"Content-Disposition: form-data; name=\"stuff\"\r\n" +
 			"\r\n" +
 			string(bufs[i]) +
-			"\r\n"
+			"\r\n")
 	}
 
-	req, err := http.NewRequest("POST", "/v2/snaps", bytes.NewBufferString(body))
+	req, err := http.NewRequest("POST", "/v2/snaps", bytes.NewBufferString(body.String()))
 	c.Assert(err, check.IsNil)
 	req.Header.Set("Content-Type", "multipart/thing; boundary=foo")
 
@@ -1335,12 +1335,13 @@ func (s *sideloadSuite) TestSideloadCleanUpTempFilesIfRequestFailed(c *check.C) 
 	s.daemonWithOverlordMockAndStore()
 
 	// write file parts
-	body := "----hello--\r\n"
+	var body strings.Builder
+	body.WriteString("----hello--\r\n")
 	for _, name := range []string{"one", "two"} {
-		body += fmt.Sprintf(
+		body.WriteString(fmt.Sprintf(
 			"Content-Disposition: form-data; name=\"snap\"; filename=\"%s\"\r\n"+
 				"\r\n"+
-				"xyzzy\r\n", name)
+				"xyzzy\r\n", name))
 	}
 
 	// make the request fail
@@ -1348,14 +1349,14 @@ func (s *sideloadSuite) TestSideloadCleanUpTempFilesIfRequestFailed(c *check.C) 
 	_, err := rand.Read(buf)
 	c.Assert(err, check.IsNil)
 
-	body += "----hello--\r\n" +
+	body.WriteString("----hello--\r\n" +
 		"Content-Disposition: form-data; name=\"devmode\"\r\n" +
 		"\r\n" +
 		string(buf) +
 		"\r\n" +
-		"----hello--\r\n"
+		"----hello--\r\n")
 
-	req, err := http.NewRequest("POST", "/v2/snaps", bytes.NewBufferString(body))
+	req, err := http.NewRequest("POST", "/v2/snaps", bytes.NewBufferString(body.String()))
 	c.Assert(err, check.IsNil)
 	req.Header.Set("Content-Type", "multipart/thing; boundary=--hello--")
 
@@ -1426,25 +1427,26 @@ func (s *sideloadSuite) TestSideloadManySnaps(c *check.C) {
 	})
 	defer readRest()
 
-	body := "----hello--\r\n" +
+	var body strings.Builder
+	body.WriteString("----hello--\r\n" +
 		"Content-Disposition: form-data; name=\"devmode\"\r\n" +
 		"\r\n" +
 		"true\r\n" +
-		"----hello--\r\n"
-	body += "Content-Disposition: form-data; name=\"transaction\"\r\n" +
+		"----hello--\r\n")
+	body.WriteString("Content-Disposition: form-data; name=\"transaction\"\r\n" +
 		"\r\n" +
 		"all-snaps\r\n" +
-		"----hello--\r\n"
+		"----hello--\r\n")
 	prefixed := make([]string, len(snaps))
 	for i, snap := range snaps {
 		prefixed[i] = "file-" + snap
-		body += "Content-Disposition: form-data; name=\"snap\"; filename=\"" + prefixed[i] + "\"\r\n" +
+		body.WriteString("Content-Disposition: form-data; name=\"snap\"; filename=\"" + prefixed[i] + "\"\r\n" +
 			"\r\n" +
 			snap + "\r\n" +
-			"----hello--\r\n"
+			"----hello--\r\n")
 	}
 
-	req, err := http.NewRequest("POST", "/v2/snaps", bytes.NewBufferString(body))
+	req, err := http.NewRequest("POST", "/v2/snaps", bytes.NewBufferString(body.String()))
 	c.Assert(err, check.IsNil)
 	req.Header.Set("Content-Type", "multipart/thing; boundary=--hello--")
 	s.asUserAuth(c, req)
@@ -1615,27 +1617,28 @@ func (s *sideloadSuite) testSideloadManySnapsAndComponents(c *check.C, opts side
 	})
 	defer restore()
 
-	body := "----hello--\r\n" +
+	var body strings.Builder
+	body.WriteString("----hello--\r\n" +
 		"Content-Disposition: form-data; name=\"dangerous\"\r\n" +
 		"\r\n" +
 		"true\r\n" +
-		"----hello--\r\n"
-	body += "Content-Disposition: form-data; name=\"transaction\"\r\n" +
+		"----hello--\r\n")
+	body.WriteString("Content-Disposition: form-data; name=\"transaction\"\r\n" +
 		"\r\n" +
 		"all-snaps\r\n" +
-		"----hello--\r\n"
+		"----hello--\r\n")
 
 	containers := make([]string, len(snaps)+len(components))
 	copy(containers, snaps)
 	copy(containers[len(snaps):], components)
 	for _, c := range containers {
-		body += "Content-Disposition: form-data; name=\"snap\"; filename=\"file-" + c + "\"\r\n" +
+		body.WriteString("Content-Disposition: form-data; name=\"snap\"; filename=\"file-" + c + "\"\r\n" +
 			"\r\n" +
 			c + "\r\n" +
-			"----hello--\r\n"
+			"----hello--\r\n")
 	}
 
-	req, err := http.NewRequest("POST", "/v2/snaps", bytes.NewBufferString(body))
+	req, err := http.NewRequest("POST", "/v2/snaps", bytes.NewBufferString(body.String()))
 	c.Assert(err, check.IsNil)
 	req.Header.Set("Content-Type", "multipart/thing; boundary=--hello--")
 	s.asUserAuth(c, req)
@@ -2058,19 +2061,20 @@ func (s *sideloadSuite) TestSideloadManyFailInstallPathMany(c *check.C) {
 	})
 	defer readRest()
 
-	body := "----hello--\r\n" +
+	var body strings.Builder
+	body.WriteString("----hello--\r\n" +
 		"Content-Disposition: form-data; name=\"devmode\"\r\n" +
 		"\r\n" +
 		"true\r\n" +
-		"----hello--\r\n"
+		"----hello--\r\n")
 	for _, snap := range []string{"one", "two"} {
-		body += "Content-Disposition: form-data; name=\"snap\"; filename=\"file-" + snap + "\"\r\n" +
+		body.WriteString("Content-Disposition: form-data; name=\"snap\"; filename=\"file-" + snap + "\"\r\n" +
 			"\r\n" +
 			"xyzzy \r\n" +
-			"----hello--\r\n"
+			"----hello--\r\n")
 	}
 
-	req, err := http.NewRequest("POST", "/v2/snaps", bytes.NewBufferString(body))
+	req, err := http.NewRequest("POST", "/v2/snaps", bytes.NewBufferString(body.String()))
 	c.Assert(err, check.IsNil)
 	req.Header.Set("Content-Type", "multipart/thing; boundary=--hello--")
 	apiErr := s.errorReq(c, req, nil, actionIsExpected)
@@ -2086,19 +2090,20 @@ func (s *sideloadSuite) TestSideloadManyFailUnsafeReadInfo(c *check.C) {
 	})
 	defer restore()
 
-	body := "----hello--\r\n" +
+	var body strings.Builder
+	body.WriteString("----hello--\r\n" +
 		"Content-Disposition: form-data; name=\"devmode\"\r\n" +
 		"\r\n" +
 		"true\r\n" +
-		"----hello--\r\n"
+		"----hello--\r\n")
 	for _, snap := range []string{"one", "two"} {
-		body += "Content-Disposition: form-data; name=\"snap\"; filename=\"file-" + snap + "\"\r\n" +
+		body.WriteString("Content-Disposition: form-data; name=\"snap\"; filename=\"file-" + snap + "\"\r\n" +
 			"\r\n" +
 			"xyzzy \r\n" +
-			"----hello--\r\n"
+			"----hello--\r\n")
 	}
 
-	req, err := http.NewRequest("POST", "/v2/snaps", bytes.NewBufferString(body))
+	req, err := http.NewRequest("POST", "/v2/snaps", bytes.NewBufferString(body.String()))
 	c.Assert(err, check.IsNil)
 	req.Header.Set("Content-Type", "multipart/thing; boundary=--hello--")
 	apiErr := s.errorReq(c, req, nil, actionIsExpected)

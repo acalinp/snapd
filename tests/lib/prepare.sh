@@ -91,6 +91,7 @@ setup_snapd_proxy() {
     if [ "${SNAPD_USE_PROXY:-}" != true ]; then
         return
     fi
+    restart=$1
 
     mkdir -p /etc/systemd/system/snapd.service.d
     cat <<EOF > /etc/systemd/system/snapd.service.d/proxy.conf
@@ -99,10 +100,11 @@ Environment=HTTPS_PROXY=$HTTPS_PROXY HTTP_PROXY=$HTTP_PROXY https_proxy=$HTTPS_P
 EOF
 
     # We change the service configuration so reload and restart
-    # the units to get them applied
+    # the units to get them applied (if requested)
     systemctl daemon-reload
-    # restart the service (it pulls up the socket)    
-    systemctl restart snapd.service
+    if [ "$restart" = true ]
+    then systemctl restart snapd.service
+    fi
 }
 
 setup_system_proxy() {
@@ -132,7 +134,6 @@ setup_systemd_snapd_overrides() {
     cat <<EOF > /etc/systemd/system/snapd.service.d/local.conf
 [Service]
 Environment=SNAPD_DEBUG_HTTP=7 SNAPD_DEBUG=1 SNAPPY_TESTING=1 SNAPD_REBOOT_DELAY=10m SNAPD_CONFIGURE_HOOK_TIMEOUT=30s SNAPPY_USE_STAGING_STORE=$SNAPPY_USE_STAGING_STORE
-ExecStartPre=/bin/touch /dev/iio:device0
 
 [Unit]
 # The default limit is usually 5, which can be easily hit in 
@@ -158,6 +159,21 @@ EOF
     # start the service (it pulls up the socket)
     systemctl start snapd.service
 }
+
+setup_systemd_snapd_core_overrides() {
+    cat <<EOF > /etc/systemd/system/snapd.service.d/core-local.conf
+[Service]
+ExecStartPre=/bin/touch /dev/iio:device0
+EOF
+    # We change the service configuration so reload and restart
+    # the units to get them applied
+    systemctl daemon-reload
+    # stop the socket (it pulls down the service)
+    systemctl stop snapd.socket
+    # start the service (it pulls up the socket)
+    systemctl start snapd.service
+}
+
 
 # setup_experimental_features enables experimental snapd features passed
 # via optional EXPERIMENTAL_FEATURES environment variable. The features must be
@@ -222,8 +238,8 @@ update_core_snap_for_classic_reexec() {
     rm squashfs-root/usr/lib/snapd/* squashfs-root/usr/bin/snap
     # and copy in the current libexec
     cp -a "$LIBEXEC_DIR"/snapd/* squashfs-root/usr/lib/snapd/
-    # also the binaries themselves
-    cp -a /usr/bin/snap squashfs-root/usr/bin/
+    # also the binaries themselves; snap is now a symlink to usr/lib/snapd/snapd
+    ln -s -r squashfs-root/usr/lib/snapd/snapd squashfs-root/usr/bin/snap
     # make sure bin/snapctl is a symlink to lib/
     if [ ! -L squashfs-root/usr/bin/snapctl ]; then
         rm -f squashfs-root/usr/bin/snapctl
@@ -293,9 +309,23 @@ update_core_snap_for_classic_reexec() {
     for p in "$LIBEXEC_DIR/snapd/snap-exec" "$LIBEXEC_DIR/snapd/snap-confine" "$LIBEXEC_DIR/snapd/snap-discard-ns" "$LIBEXEC_DIR/snapd/snapd" "$LIBEXEC_DIR/snapd/snap-update-ns"; do
         check_file "$p" "$core/usr/lib/snapd/$(basename "$p")"
     done
-    for p in /usr/bin/snapctl /usr/bin/snap; do
-        check_file "$p" "$core$p"
-    done
+    check_file /usr/bin/snapctl "${core}/usr/bin/snapctl"
+    if ! command -v selinuxenabled; then
+        # systems without SELinux have or point to the exact same binary in the
+        # core snap and on the host
+        check_file "/usr/bin/snap" "${core}/usr/bin/snap"
+    else
+        # on SELinux enabled systems /usr/bin/snap is a thin wrapper which serves as an policy
+        # attachment point, and is not the same binary as in the core/snapd snap
+        if cmp  "/usr/bin/snap" "${core}/usr/bin/snap"; then
+            echo "host /usr/bin/snap is unexpectedly the same as one from ${core}"
+            exit 1
+        fi
+        if [ -L /usr/bin/snap ]; then
+            echo "/usr/bin/snap is a symbolic link"
+            exit 1
+        fi
+    fi
 }
 
 prepare_memory_limit_override() {
@@ -404,7 +434,7 @@ prepare_each_core() {
 
 prepare_classic() {
     # Configure the proxy in the system when it is required
-    setup_system_proxy   
+    setup_system_proxy
 
     # Skip building snapd when REUSE_SNAPD is set to 1
     if [ "$REUSE_SNAPD" != 1 ]; then
@@ -473,17 +503,19 @@ prepare_classic() {
         snap info snapd
         echo "Error: not expecting snapd snap to be installed"
         exit 1
-    else
-        build_dir="$SNAPD_WORK_DIR/snapd_snap_for_classic"
-        rm -rf "$build_dir"
-        mkdir -p "$build_dir"
-        build_snapd_snap "$build_dir"
-        snap install --dangerous "$build_dir/"snapd_*.snap
-        snap wait system seed.loaded
     fi
-    snap list snapd
 
-    setup_snapd_proxy
+    # The installation of the snap will restart the service, no need to restart
+    # it here too. Otherwise we end up hitting systemd restart limit.
+    setup_snapd_proxy false
+
+    build_dir="$SNAPD_WORK_DIR/snapd_snap_for_classic"
+    rm -rf "$build_dir"
+    mkdir -p "$build_dir"
+    build_snapd_snap "$build_dir"
+    snap install --dangerous "$build_dir/"snapd_*.snap
+    snap wait system seed.loaded
+    snap list snapd
 
     mount_dir="$(os.paths snap-mount-dir)"
     if ! getcap "$mount_dir"/snapd/current/usr/lib/snapd/snap-confine | grep "cap_sys_admin"; then
@@ -1401,8 +1433,10 @@ setup_reflash_magic() {
     snap tasks --last=seed || true
     journalctl -u snapd
     snap model --verbose
+    #shellcheck source=tests/lib/nested.sh
+    . "$TESTSLIB/nested.sh"
     # remove the above debug lines once the mentioned bug is fixed
-    snap install "--channel=${CORE_CHANNEL:-edge}" "$core_name"
+    snap install "--channel=$(nested_get_base_channel)" "$core_name"
     # TODO set up a trap to clean this up properly?
     local UNPACK_DIR
     UNPACK_DIR="$(mktemp -d "/tmp/$core_name-unpack.XXXXXXXX")"
@@ -1584,7 +1618,7 @@ EOF
         # so for now, don't include snapd.debug=1, but eventually it would be
         # nice to have this on
 
-        if [[ "$SPREAD_BACKEND" =~ google ]] || [[ "$SPREAD_BACKEND" =~ openstack ]]; then
+        if [[ "$SPREAD_BACKEND" =~ google ]] || [[ "$SPREAD_BACKEND" =~ openstack ]] || [[ "$SPREAD_BACKEND" =~ garden ]]; then
             # the default console settings for snapd aren't super useful in GCE,
             # instead it's more useful to have all console go to ttyS0 which we 
             # can read more easily than tty1 for example
@@ -1910,7 +1944,7 @@ prepare_ubuntu_core() {
     fi
     retry -n 10 --wait 1 sh -c 'systemctl is-active snapd snapd.socket'
 
-    setup_snapd_proxy
+    setup_snapd_proxy true
 
     disable_journald_rate_limiting
     disable_journald_start_limiting
@@ -1996,6 +2030,7 @@ prepare_ubuntu_core() {
 
     disable_refreshes
     setup_systemd_snapd_overrides
+    setup_systemd_snapd_core_overrides
 
     # Snapshot the fresh state (including boot/bootenv)
     if ! is_snapd_state_saved; then

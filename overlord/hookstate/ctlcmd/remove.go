@@ -20,7 +20,10 @@
 package ctlcmd
 
 import (
+	"fmt"
+
 	"github.com/snapcore/snapd/i18n"
+	"github.com/snapcore/snapd/strutil"
 )
 
 var (
@@ -39,6 +42,7 @@ type removeCommand struct {
 	Positional struct {
 		Names []string `positional-arg-name:"<snap|snap+comp|+comp>" required:"yes" description:"Components to be removed (snap must be the caller snap if specified)."`
 	} `positional-args:"yes"`
+	NoWait bool `long:"no-wait" description:"Run the command in asynchronous mode, returning a change id that can be used to determine if the change is ready using the is-ready command."`
 }
 
 func (c *removeCommand) Execute([]string) error {
@@ -52,9 +56,18 @@ func (c *removeCommand) Execute([]string) error {
 		return err
 	}
 
-	if err := runSnapManagementCommand(ctx, managementCommand{
-		operation: removeManagementCommand, components: comps}); err != nil {
+	async := strutil.ListContains(c.clientFeatures, "async")
+
+	id, _, err := runSnapManagementCommand(ctx, managementCommand{operation: removeManagementCommand, components: comps, async: async, noWait: c.NoWait})
+	if err != nil {
 		return err
+	}
+
+	// To allow --no-wait to automatically return, we can't send change ID back to client
+	if c.NoWait {
+		fmt.Fprintf(c.stdout, "%s\n", id)
+	} else if async {
+		*c.changeID = id
 	}
 
 	return nil

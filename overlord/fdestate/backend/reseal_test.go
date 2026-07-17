@@ -35,6 +35,7 @@ import (
 	"github.com/snapcore/snapd/dirs"
 	"github.com/snapcore/snapd/gadget/device"
 	"github.com/snapcore/snapd/logger"
+	"github.com/snapcore/snapd/osutil"
 	"github.com/snapcore/snapd/overlord/fdestate/backend"
 	"github.com/snapcore/snapd/secboot"
 	"github.com/snapcore/snapd/testutil"
@@ -196,6 +197,7 @@ type fakeSealedKey struct {
 
 type tpmResealHappyCase struct {
 	revokeOldKeys             bool
+	dryRun                    bool
 	missingRunParams          bool
 	missingRecoverParams      bool
 	onClassic                 bool
@@ -453,6 +455,7 @@ func (s *resealTestSuite) testTPMResealHappy(c *C, tc tpmResealHappyCase) {
 			filepath.Join(dirs.SnapSaveDir, "device/fde", "aux-key"),
 			filepath.Join(dirs.SnapSaveDir, "device/fde", "tpm-policy-auth-key"),
 		})
+		c.Check(params.DryRun, Equals, tc.dryRun)
 
 		c.Logf("key: %v", key)
 
@@ -534,7 +537,9 @@ func (s *resealTestSuite) testTPMResealHappy(c *C, tc tpmResealHappyCase) {
 		},
 	}
 
+	revokeOldKeysCalled := 0
 	defer backend.MockSecbootRevokeOldKeys(func(uk *secboot.UpdatedKeys, primaryKey []byte) error {
+		revokeOldKeysCalled = 1
 		if !tc.revokeOldKeys {
 			c.Errorf("unexpected call")
 			return fmt.Errorf("unexpected call")
@@ -570,7 +575,7 @@ func (s *resealTestSuite) testTPMResealHappy(c *C, tc tpmResealHappyCase) {
 	loggerBuf, restore := logger.MockLogger()
 	defer restore()
 
-	opts := boot.ResealKeyToModeenvOptions{ExpectReseal: true, RevokeOldKeys: tc.revokeOldKeys}
+	opts := boot.ResealKeyToModeenvOptions{ExpectReseal: true, RevokeOldKeys: tc.revokeOldKeys, DryRun: tc.dryRun}
 	err := backend.ResealKeyForBootChains(myState, device.SealingMethodTPM, s.rootdir, &boot.ResealKeyForBootChainsParams{BootChains: bootChains, Options: opts})
 	if tc.noPrimaryKey && tc.revokeOldKeys {
 		c.Assert(err, ErrorMatches, `Missing primary key`)
@@ -599,18 +604,35 @@ func (s *resealTestSuite) testTPMResealHappy(c *C, tc tpmResealHappyCase) {
 	c.Check(resealCalls, Equals, 3)
 	c.Check(loadCheckResultCalls, Equals, 1)
 
-	pbc, cnt, err := boot.ReadBootChains(filepath.Join(dirs.SnapFDEDir, "boot-chains"))
-	c.Assert(err, IsNil)
-	if !tc.missingRunParams {
-		c.Assert(cnt, Equals, 1)
-		c.Check(pbc, DeepEquals, boot.ToPredictableBootChains(removeKernelBootFiles(append(bootChains.RunModeBootChains, bootChains.RecoveryBootChainsForRunKey...))))
+	if tc.dryRun {
+		// DryRun must not write boot chains files
+		c.Check(osutil.FileExists(filepath.Join(dirs.SnapFDEDir, "boot-chains")), Equals, false)
+		c.Check(osutil.FileExists(filepath.Join(dirs.SnapFDEDir, "recovery-boot-chains")), Equals, false)
+		// DryRun must not update the FDE state
+		c.Check(myState.state, IsNil)
+	} else {
+		pbc, cnt, err := boot.ReadBootChains(filepath.Join(dirs.SnapFDEDir, "boot-chains"))
+		c.Assert(err, IsNil)
+		if !tc.missingRunParams {
+			c.Assert(cnt, Equals, 1)
+			c.Check(pbc, DeepEquals, boot.ToPredictableBootChains(removeKernelBootFiles(append(bootChains.RunModeBootChains, bootChains.RecoveryBootChainsForRunKey...))))
+		}
+
+		recoveryPbc, cnt, err := boot.ReadBootChains(filepath.Join(dirs.SnapFDEDir, "recovery-boot-chains"))
+		c.Assert(err, IsNil)
+		if !tc.missingRecoverParams {
+			c.Check(recoveryPbc, DeepEquals, boot.ToPredictableBootChains(removeKernelBootFiles(bootChains.RecoveryBootChains)))
+			c.Assert(cnt, Equals, 1)
+		}
 	}
 
-	recoveryPbc, cnt, err := boot.ReadBootChains(filepath.Join(dirs.SnapFDEDir, "recovery-boot-chains"))
-	c.Assert(err, IsNil)
-	if !tc.missingRecoverParams {
-		c.Check(recoveryPbc, DeepEquals, boot.ToPredictableBootChains(removeKernelBootFiles(bootChains.RecoveryBootChains)))
-		c.Assert(cnt, Equals, 1)
+	if tc.revokeOldKeys && tc.dryRun {
+		// DryRun must not revoke old keys
+		c.Assert(revokeOldKeysCalled, Equals, 0)
+	} else if tc.revokeOldKeys && !tc.missingRunParams && !tc.missingRecoverParams {
+		c.Assert(revokeOldKeysCalled, Equals, 1)
+	} else {
+		c.Assert(revokeOldKeysCalled, Equals, 0)
 	}
 }
 
@@ -699,6 +721,30 @@ func (s *resealTestSuite) TestTPMResealHappyMultiplePolicyCounters(c *C) {
 	tc := tpmResealHappyCase{
 		onClassic:                 true,
 		multipleRevocationCounter: true,
+	}
+	s.testTPMResealHappy(c, tc)
+}
+
+func (s *resealTestSuite) TestTPMResealHappyDryRun(c *C) {
+	tc := tpmResealHappyCase{
+		onClassic: true,
+		dryRun:    true,
+	}
+	s.testTPMResealHappy(c, tc)
+}
+
+func (s *resealTestSuite) TestTPMResealHappyCoreDryRun(c *C) {
+	tc := tpmResealHappyCase{
+		dryRun: true,
+	}
+	s.testTPMResealHappy(c, tc)
+}
+
+func (s *resealTestSuite) TestTPMResealHappyDryRunWithRevoke(c *C) {
+	tc := tpmResealHappyCase{
+		onClassic:     true,
+		dryRun:        true,
+		revokeOldKeys: true,
 	}
 	s.testTPMResealHappy(c, tc)
 }
@@ -2597,176 +2643,4 @@ func (s *resealTestSuite) TestResealKeyForSignatureDBUpdate(c *C) {
 	// reseal was called
 	c.Check(buildProfileCalls, Equals, 3)
 	c.Check(resealKeysCalls, Equals, 3)
-}
-
-func (s *resealTestSuite) TestTPMResealEnsureProvisioned(c *C) {
-	bl := bootloadertest.Mock("trusted", "").WithTrustedAssets()
-	bootloader.Force(bl)
-	defer bootloader.Force(nil)
-
-	bl.TrustedAssetsMap = map[string]string{
-		"asset": "asset",
-	}
-	recoveryKernel := bootloader.NewBootFile("/var/lib/snapd/seed/snaps/pc-kernel_1.snap", "kernel.efi", bootloader.RoleRecovery)
-	runKernel := bootloader.NewBootFile(filepath.Join(s.rootdir, "var/lib/snapd/snaps/pc-kernel_500.snap"), "kernel.efi", bootloader.RoleRunMode)
-
-	bl.RecoveryBootChainList = []bootloader.BootFile{
-		bootloader.NewBootFile("", "asset", bootloader.RoleRecovery),
-		recoveryKernel,
-	}
-	bl.BootChainList = []bootloader.BootFile{
-		bootloader.NewBootFile("", "asset", bootloader.RoleRunMode),
-		runKernel,
-	}
-
-	c.Assert(os.MkdirAll(filepath.Join(dirs.SnapBootAssetsDir, "trusted"), 0755), IsNil)
-	for _, name := range []string{
-		"asset-runassethash",
-		"asset-assethash",
-	} {
-		err := os.WriteFile(filepath.Join(dirs.SnapBootAssetsDir, "trusted", name), nil, 0644)
-		c.Assert(err, IsNil)
-	}
-
-	model := boottest.MakeMockUC20Model()
-	bootChains := boot.BootChains{
-		RunModeBootChains: []boot.BootChain{
-			{
-				BrandID:        model.BrandID(),
-				Model:          model.Model(),
-				Classic:        model.Classic(),
-				Grade:          model.Grade(),
-				ModelSignKeyID: model.SignKeyID(),
-
-				AssetChain: []boot.BootAsset{
-					{
-						Role: bootloader.RoleRecovery,
-						Name: "asset",
-						Hashes: []string{
-							"assethash",
-						},
-					},
-					{
-						Role: bootloader.RoleRunMode,
-						Name: "asset",
-						Hashes: []string{
-							"runassethash",
-						},
-					},
-				},
-
-				Kernel:         "kernel.efi",
-				KernelRevision: "500",
-				KernelCmdlines: []string{
-					"mode=run",
-				},
-				KernelBootFile: runKernel,
-			},
-		},
-
-		RecoveryBootChainsForRunKey: []boot.BootChain{
-			{
-				BrandID:        model.BrandID(),
-				Model:          model.Model(),
-				Classic:        model.Classic(),
-				Grade:          model.Grade(),
-				ModelSignKeyID: model.SignKeyID(),
-
-				AssetChain: []boot.BootAsset{
-					{
-						Role: bootloader.RoleRecovery,
-						Name: "asset",
-						Hashes: []string{
-							"assethash",
-						},
-					},
-				},
-
-				Kernel:         "kernel.efi",
-				KernelRevision: "1",
-				KernelCmdlines: []string{
-					"mode=recover",
-				},
-				KernelBootFile: recoveryKernel,
-			},
-		},
-
-		RecoveryBootChains: []boot.BootChain{
-			{
-				BrandID:        model.BrandID(),
-				Model:          model.Model(),
-				Classic:        model.Classic(),
-				Grade:          model.Grade(),
-				ModelSignKeyID: model.SignKeyID(),
-
-				AssetChain: []boot.BootAsset{
-					{
-						Role: bootloader.RoleRecovery,
-						Name: "asset",
-						Hashes: []string{
-							"assethash",
-						},
-					},
-				},
-
-				Kernel:         "kernel.efi",
-				KernelRevision: "1",
-				KernelCmdlines: []string{
-					"mode=recover",
-				},
-				KernelBootFile: recoveryKernel,
-			},
-		},
-
-		RoleToBlName: map[bootloader.Role]string{
-			bootloader.RoleRecovery: "trusted",
-			bootloader.RoleRunMode:  "trusted",
-		},
-	}
-
-	buildPCRProtectionProfileCalls := 0
-	defer backend.MockSecbootBuildPCRProtectionProfile(func(modelParams []*secboot.SealKeyModelParams, checkResult *secboot.PreinstallCheckResult, allowInsufficientDmaProtection bool) (secboot.SerializedPCRProfile, error) {
-		buildPCRProtectionProfileCalls++
-		return []byte(`"serialized-pcr-profile"`), nil
-	})()
-
-	resealCalls := 0
-	defer backend.MockSecbootResealKey(func(key secboot.KeyDataLocation, params *secboot.ResealKeyParams) (secboot.UpdatedKeys, error) {
-		resealCalls++
-		return nil, nil
-	})()
-
-	myState := &fakeState{}
-	myState.EncryptedContainers = []backend.EncryptedContainer{
-		&encryptedContainer{
-			uuid:          "123",
-			containerRole: "system-data",
-			legacyKeys: map[string]string{
-				"default":          filepath.Join(s.rootdir, "run/mnt/ubuntu-boot/device/fde/ubuntu-data.sealed-key"),
-				"default-fallback": filepath.Join(s.rootdir, "run/mnt/ubuntu-seed/device/fde/ubuntu-data.recovery.sealed-key"),
-			},
-		},
-		&encryptedContainer{
-			uuid:          "456",
-			containerRole: "system-save",
-			legacyKeys: map[string]string{
-				"default-fallback": filepath.Join(s.rootdir, "run/mnt/ubuntu-seed/device/fde/ubuntu-save.recovery.sealed-key"),
-			},
-		},
-	}
-
-	provisioned := 0
-	defer backend.MockSecbootProvisionTPM(func(mode secboot.TPMProvisionMode, lockoutAuthFile string) error {
-		provisioned++
-		c.Check(mode, Equals, secboot.TPMPartialReprovision)
-		c.Check(lockoutAuthFile, Equals, filepath.Join(s.rootdir, "/run/mnt/ubuntu-save/device/fde/tpm-lockout-auth"))
-		return nil
-	})()
-
-	opts := boot.ResealKeyToModeenvOptions{ExpectReseal: true, EnsureProvisioned: true}
-	err := backend.ResealKeyForBootChains(myState, device.SealingMethodTPM, s.rootdir, &boot.ResealKeyForBootChainsParams{BootChains: bootChains, Options: opts})
-	c.Assert(err, IsNil)
-
-	c.Check(resealCalls, Equals, 3)
-	c.Check(provisioned, Equals, 1)
 }

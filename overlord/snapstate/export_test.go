@@ -31,7 +31,6 @@ import (
 	"github.com/snapcore/snapd/store"
 	"github.com/snapcore/snapd/testutil"
 	userclient "github.com/snapcore/snapd/usersession/client"
-	"github.com/snapcore/snapd/wrappers"
 )
 
 type (
@@ -195,9 +194,8 @@ var (
 	NewRefreshHints               = newRefreshHints
 	CanRefreshOnMeteredConnection = canRefreshOnMeteredConnection
 
-	NewCatalogRefresh            = newCatalogRefresh
-	CatalogRefreshDelayBase      = catalogRefreshDelayBase
-	CatalogRefreshDelayWithDelta = catalogRefreshDelayWithDelta
+	NewCatalogRefresh       = newCatalogRefresh
+	CatalogRefreshDelayBase = catalogRefreshDelayBase
 
 	SoftCheckNothingRunningForRefresh     = softCheckNothingRunningForRefresh
 	HardEnsureNothingRunningDuringRefresh = hardEnsureNothingRunningDuringRefresh
@@ -362,12 +360,12 @@ func MockEnsuredDesktopFilesUpdated(m *SnapManager, ensured bool) (restore func(
 	}
 }
 
-func MockEnsuredDownloadsCleaned(m *SnapManager, ensured bool) (restore func()) {
-	old := m.ensuredDownloadsCleaned
-	m.ensuredDownloadsCleaned = ensured
-	return func() {
-		m.ensuredDownloadsCleaned = old
-	}
+func SetEnsuredDownloadsCleanedNext(m *SnapManager, next time.Time) {
+	m.ensuredDownloadsCleanedNext = next
+}
+
+func GetEnsuredDownloadsCleanedNext(m *SnapManager) time.Time {
+	return m.ensuredDownloadsCleanedNext
 }
 
 func MockPidsOfSnap(f func(instanceName string) (map[string][]int, error)) func() {
@@ -394,7 +392,7 @@ func MockInstallSize(f func(st *state.State, snaps []minimalInstallInfo, userID 
 	}
 }
 
-func MockGenerateSnapdWrappers(f func(snapInfo *snap.Info, opts *backend.GenerateSnapdWrappersOptions) (wrappers.SnapdRestart, error)) func() {
+func MockGenerateSnapdWrappers(f func(snapInfo *snap.Info, opts *backend.GenerateSnapdWrappersOptions) error) func() {
 	old := generateSnapdWrappers
 	generateSnapdWrappers = f
 	return func() {
@@ -433,6 +431,12 @@ func MockRefreshAppsCheck(fn func(info *snap.Info) error) (restore func()) {
 	return func() { refreshAppsCheck = old }
 }
 
+func MockCheckSeedRefreshRemove(fn func(st *state.State, si *snap.Info, dctx DeviceContext) error) (restore func()) {
+	r := testutil.Backup(&CheckSeedRefreshRemove)
+	CheckSeedRefreshRemove = fn
+	return r
+}
+
 func (m *autoRefresh) EnsureRefreshHoldAtLeast(d time.Duration) error {
 	return m.ensureRefreshHoldAtLeast(d)
 }
@@ -448,18 +452,19 @@ func MockSecurityProfilesDiscardLate(fn func(snapName string, rev snap.Revision,
 type HoldState = holdState
 
 var (
-	HoldDurationLeft           = holdDurationLeft
-	LastRefreshed              = lastRefreshed
-	PruneRefreshCandidates     = pruneRefreshCandidates
-	UpdateRefreshCandidates    = updateRefreshCandidates
-	ResetGatingForRefreshed    = resetGatingForRefreshed
-	PruneGating                = pruneGating
-	PruneSnapsHold             = pruneSnapsHold
-	CreateGateAutoRefreshHooks = createGateAutoRefreshHooks
-	AutoRefreshPhase1          = autoRefreshPhase1
-	RefreshRetain              = refreshRetain
-	RefreshCheck               = refreshAppsCheck
-	AffectsRunningHooks        = affectsRunningHooks
+	HoldDurationLeft                     = holdDurationLeft
+	LastRefreshed                        = lastRefreshed
+	PruneRefreshCandidates               = pruneRefreshCandidates
+	UpdateRefreshCandidates              = updateRefreshCandidates
+	ResetGatingForRefreshed              = resetGatingForRefreshed
+	PruneGating                          = pruneGating
+	PruneSnapsHold                       = pruneSnapsHold
+	CreateGateAutoRefreshHooks           = createGateAutoRefreshHooks
+	AutoRefreshPhase1                    = autoRefreshPhase1
+	RefreshRetain                        = refreshRetain
+	RefreshCheck                         = refreshAppsCheck
+	AffectsRunningHooks                  = affectsRunningHooks
+	ShouldScheduleUpdateCertDBForRefresh = shouldScheduleUpdateCertDBForRefresh
 
 	ExcludeFromRefreshAppAwareness = excludeFromRefreshAppAwareness
 )
@@ -626,12 +631,19 @@ type SnapInstallTaskSet = snapInstallTaskSet
 func NewSnapInstallTaskSetForTest(
 	snapsup *SnapSetup,
 	ts *state.TaskSet,
-	beforeLocalSystemModificationsTasks, upToLinkSnapAndBeforeReboot, afterLinkSnapAndPostReboot []*state.Task,
+	prerequisites *state.Task,
+	beforeLocalSystemModificationsTasks []*state.Task,
+	prerequisitesSync *state.Task,
+	mountSnap *state.Task,
+	upToLinkSnapAndBeforeReboot, afterLinkSnapAndPostReboot []*state.Task,
 ) SnapInstallTaskSet {
 	return SnapInstallTaskSet{
 		ts:                                  ts,
 		snapsup:                             snapsup,
+		prerequisites:                       prerequisites,
 		beforeLocalSystemModificationsTasks: beforeLocalSystemModificationsTasks,
+		prerequisitesSync:                   prerequisitesSync,
+		mountSnap:                           mountSnap,
 		upToLinkSnapAndBeforeReboot:         upToLinkSnapAndBeforeReboot,
 		afterLinkSnapAndPostReboot:          afterLinkSnapAndPostReboot,
 	}
@@ -641,4 +653,8 @@ var ArrangeRebootAndUpdateSeed = arrangeRebootAndUpdateSeed
 
 func MockProcessDelayedSecurityBackendEffects(f func(st *state.State, lanes []int, joinLane int) (ts *state.TaskSet)) (restore func()) {
 	return testutil.Mock(&ProcessDelayedSecurityBackendEffects, f)
+}
+
+func (s *catalogRefresh) GetCatalogRefreshDelayWithDelta() time.Duration {
+	return s.catalogRefreshDelayWithDelta
 }

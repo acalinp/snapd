@@ -227,6 +227,13 @@ install_dependencies_gce_bucket(){
 ###
 
 prepare_project() {
+    if [ "$SNAPD_SKIP_EARLY_REFRESH" = true ] && command -v snap >/dev/null 2>&1; then
+        "$TESTSTOOLS"/snapd-state cancel-autorefresh
+
+        # Set a far future date to prevent automatic refreshes during the test execution.
+        snap set system refresh.hold="2050-01-01T00:00:00Z"
+    fi
+
     if os.query is-ubuntu && os.query is-classic; then
         apt-get remove --purge -y lxd lxcfs || true
         apt-get autoremove --purge -y
@@ -527,7 +534,7 @@ prepare_project() {
     case "$SPREAD_SYSTEM" in
         debian-*|ubuntu-*)
             do_depinstall() {
-                best_golang=golang-1.18
+                best_golang=golang-1.23
                 case "$SPREAD_SYSTEM" in
                     ubuntu-fips-*)
                         # we are limited by the FIPS variants of go toolchain
@@ -539,14 +546,17 @@ prepare_project() {
                         quiet apt install -y golang-1.23
                         ;;
                 esac
-                # in 16.04: "apt build-dep -y ./" would also work but not on 14.04
-                gdebi --quiet --apt-line ./debian/control >deps.txt
-                quiet xargs -r eatmydata apt-get install -y < deps.txt
-                # The go 1.18 backport is not using alternatives or anything else so
-                # we need to get it on path somehow. This is not perfect but simple.
+                apt build-dep -y ./ # we don't run this for 14.04
+                # We need to ensure the correct version of golang is used.
                 if [ -z "$(command -v go)" ]; then
-                    # the path filesystem path is: /usr/lib/go-1.18/bin
-                    ln -s "/usr/lib/${best_golang/lang/}/bin/go" /usr/bin/go
+                    # Find the path to the versioned go which was installed as a dependency
+                    for real_golang in "$best_golang" golang-1.23 golang-1.22 golang-1.21 golang-1.20 golang-1.18 ; do
+                        real_golang_path="/usr/lib/${real_golang/lang/}/bin/go"
+                        if [ -e "$real_golang_path" ]; then
+                            ln -s "$real_golang_path" /usr/bin/go
+                            break
+                        fi
+                    done
                 fi
             }
 
@@ -611,10 +621,8 @@ prepare_project() {
                 exit 1
                 ;;
             ubuntu-*|debian-*)
-                # in 16.04: "apt build-dep -y ./" would also work but not on 14.04
-                gdebi --quiet --apt-line ./debian/control >deps.txt
-                quiet xargs -r eatmydata apt-get install -y < deps.txt
-                
+                apt-get build-dep -y ./ # 14.04 is handled above
+
                 build_deb
                 ;;
             fedora-*|opensuse-*|amazon-*|centos-*)
@@ -683,9 +691,18 @@ prepare_suite() {
         snap set system journal.persistent=true
     fi
 
+    initial_mount_dir="$(os.paths snap-mount-dir)"
+    tests.invariant set snap-mount-dir "$initial_mount_dir"
+    # capture the snap mount directory, which should have been created by
+    # package installation
+    echo "$initial_mount_dir" | MATCH "(/var/lib/snapd)?/snap"
+
     # Make sure the suite starts with a clean environment and with the snapd state restored
     # shellcheck source=tests/lib/reset.sh
     "$TESTSLIB"/reset.sh --reuse-core
+
+    # make sure that reset did not break anything
+    tests.invariant check snap-mount-dir
 }
 
 prepare_suite_each() {

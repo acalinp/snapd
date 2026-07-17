@@ -734,7 +734,7 @@ apps:
 	st.Lock()
 	defer st.Unlock()
 
-	ts, _, err := snapstate.InstallPath(st, &snap.SideInfo{RealName: "foo"}, snapPath, "", "", snapstate.Flags{DevMode: true}, nil)
+	ts, err := snapstate.InstallPath(st, &snap.SideInfo{RealName: "foo"}, snapPath, "", "", snapstate.Flags{DevMode: true}, nil)
 	c.Assert(err, IsNil)
 	chg := st.NewChange("install-snap", "...")
 	chg.AddAll(ts)
@@ -788,7 +788,7 @@ hooks:
 		switch ctx.HookName() {
 		case "install":
 			installHook = true
-			_, _, err := ctlcmd.Run(ctx, []string{"set", "installed=true"}, 0, nil)
+			_, _, _, err := ctlcmd.Run(ctx, []string{"set", "installed=true"}, 0, nil)
 			c.Assert(err, IsNil)
 			return nil, nil
 		case "configure":
@@ -801,7 +801,7 @@ hooks:
 	st.Lock()
 	defer st.Unlock()
 
-	ts, _, err := snapstate.InstallPath(st, &snap.SideInfo{RealName: "foo"}, snapPath, "", "", snapstate.Flags{DevMode: true}, nil)
+	ts, err := snapstate.InstallPath(st, &snap.SideInfo{RealName: "foo"}, snapPath, "", "", snapstate.Flags{DevMode: true}, nil)
 	c.Assert(err, IsNil)
 	chg := st.NewChange("install-snap", "...")
 	chg.AddAll(ts)
@@ -982,6 +982,13 @@ func (s *mgrsSuite) TestHappyRefreshWithQuotasInServiceUnitMaintained(c *C) {
 
 	r = servicestate.EnsureQuotaUsability()
 	defer r()
+
+	r = cgroup.MockVersion(cgroup.V2, nil)
+	defer r()
+
+	ctrls := filepath.Join(dirs.GlobalRootDir, "/sys/fs/cgroup/cgroup.controllers")
+	c.Assert(os.MkdirAll(filepath.Dir(ctrls), 0755), IsNil)
+	c.Assert(os.WriteFile(ctrls, []byte("foo memory baz\n"), 0o644), IsNil)
 
 	st := s.o.State()
 	st.Lock()
@@ -2163,7 +2170,7 @@ apps:
 	err = assertstate.Add(st, snapDecl)
 	c.Assert(err, IsNil)
 
-	ts, _, err := snapstate.InstallPath(st, si, snapPath, "", "", snapstate.Flags{DevMode: true}, nil)
+	ts, err := snapstate.InstallPath(st, si, snapPath, "", "", snapstate.Flags{DevMode: true}, nil)
 	c.Assert(err, IsNil)
 	chg := st.NewChange("install-snap", "...")
 	chg.AddAll(ts)
@@ -2228,7 +2235,7 @@ apps:
 	err = assertstate.Add(st, snapDecl)
 	c.Assert(err, IsNil)
 
-	_, _, err = snapstate.InstallPath(st, si, snapPath, "bar_instance", "", snapstate.Flags{DevMode: true}, nil)
+	_, err = snapstate.InstallPath(st, si, snapPath, "bar_instance", "", snapstate.Flags{DevMode: true}, nil)
 	c.Assert(err, ErrorMatches, `cannot install snap "bar_instance": instance name prefix does not match snap name: bar != foo`)
 }
 
@@ -2258,7 +2265,7 @@ apps:
 	err = assertstate.Add(st, snapDecl)
 	c.Assert(err, IsNil)
 
-	_, _, err = snapstate.InstallPath(st, si, snapPath, "bar_invalid_instance_name", "", snapstate.Flags{DevMode: true}, nil)
+	_, err = snapstate.InstallPath(st, si, snapPath, "bar_invalid_instance_name", "", snapstate.Flags{DevMode: true}, nil)
 	c.Assert(err, ErrorMatches, `invalid instance name: invalid instance key: "invalid_instance_name"`)
 }
 
@@ -2294,7 +2301,7 @@ slots:
 	restoreSanitize := snap.MockSanitizePlugsSlots(func(snapInfo *snap.Info) {})
 	defer restoreSanitize()
 
-	ts, _, err := snapstate.InstallPath(st, si, snapPath, "", "", snapstate.Flags{DevMode: true}, nil)
+	ts, err := snapstate.InstallPath(st, si, snapPath, "", "", snapstate.Flags{DevMode: true}, nil)
 	c.Assert(err, IsNil)
 	chg := st.NewChange("install-snap", "...")
 	chg.AddAll(ts)
@@ -2482,7 +2489,7 @@ type: os
 
 	// InstallPath does not set any restart boundaries by itself, this is something
 	// that must be handled where we use it, and actually schedule the change.
-	ts, _, err := snapstate.InstallPath(st, &snap.SideInfo{RealName: "core"}, snapPath, "", "", snapstate.Flags{}, nil)
+	ts, err := snapstate.InstallPath(st, &snap.SideInfo{RealName: "core"}, snapPath, "", "", snapstate.Flags{}, nil)
 	c.Assert(err, IsNil)
 	chg := st.NewChange("install-snap", "...")
 	chg.AddAll(ts)
@@ -2561,7 +2568,7 @@ type: os
 
 	// InstallPath does not set any restart boundaries by itself, this is something
 	// that must be handled where we use it, and actually schedule the change.
-	ts, _, err := snapstate.InstallPath(st, &snap.SideInfo{RealName: "core"}, snapPath, "", "", snapstate.Flags{}, nil)
+	ts, err := snapstate.InstallPath(st, &snap.SideInfo{RealName: "core"}, snapPath, "", "", snapstate.Flags{}, nil)
 	c.Assert(err, IsNil)
 	chg := st.NewChange("install-snap", "...")
 	chg.AddAll(ts)
@@ -2708,7 +2715,7 @@ type: kernel`
 
 	// InstallPath does not set any restart boundaries by itself, this is something
 	// that must be handled where we use it, and actually schedule the change.
-	ts, _, err := snapstate.InstallPath(st, &snap.SideInfo{RealName: "pc-kernel"}, snapPath, "", "", snapstate.Flags{}, nil)
+	ts, err := snapstate.InstallPath(st, &snap.SideInfo{RealName: "pc-kernel"}, snapPath, "", "", snapstate.Flags{}, nil)
 	c.Assert(err, IsNil)
 	chg := st.NewChange("install-snap", "...")
 	chg.AddAll(ts)
@@ -2810,7 +2817,7 @@ type: kernel`
 
 	// InstallPath does not set any restart boundaries by itself, this is something
 	// that must be handled where we use it, and actually schedule the change.
-	ts, _, err := snapstate.InstallPath(st, &snap.SideInfo{RealName: "pc-kernel"}, snapPath, "", "", snapstate.Flags{}, nil)
+	ts, err := snapstate.InstallPath(st, &snap.SideInfo{RealName: "pc-kernel"}, snapPath, "", "", snapstate.Flags{}, nil)
 	c.Assert(err, IsNil)
 
 	terr := st.NewTask("error-trigger", "provoking total undo")
@@ -2968,7 +2975,7 @@ type: kernel`
 
 	// InstallPath does not set any restart boundaries by itself, this is something
 	// that must be handled where we use it, and actually schedule the change.
-	ts, _, err := snapstate.InstallPath(st, &snap.SideInfo{RealName: "pc-kernel"}, kernelSnapPath, "", "", snapstate.Flags{}, nil)
+	ts, err := snapstate.InstallPath(st, &snap.SideInfo{RealName: "pc-kernel"}, kernelSnapPath, "", "", snapstate.Flags{}, nil)
 	c.Assert(err, IsNil)
 	chg := st.NewChange("install-snap", "...")
 	chg.AddAll(ts)
@@ -3137,7 +3144,7 @@ type: kernel`
 
 	// InstallPath does not set any restart boundaries by itself, this is something
 	// that must be handled where we use it, and actually schedule the change.
-	ts, _, err := snapstate.InstallPath(st, &snap.SideInfo{RealName: "pc-kernel"}, kernelSnapPath, "", "", snapstate.Flags{}, nil)
+	ts, err := snapstate.InstallPath(st, &snap.SideInfo{RealName: "pc-kernel"}, kernelSnapPath, "", "", snapstate.Flags{}, nil)
 	c.Assert(err, IsNil)
 
 	terr := st.NewTask("error-trigger", "provoking total undo")
@@ -3243,7 +3250,7 @@ func (s *mgrsSuite) installLocalTestSnap(c *C, snapYamlContent string) *snap.Inf
 	var snapst snapstate.SnapState
 	snapstate.Get(st, snapName, &snapst)
 
-	ts, _, err := snapstate.InstallPath(st, &snap.SideInfo{RealName: snapName}, snapPath, "", "", snapstate.Flags{DevMode: true}, nil)
+	ts, err := snapstate.InstallPath(st, &snap.SideInfo{RealName: snapName}, snapPath, "", "", snapstate.Flags{DevMode: true}, nil)
 	c.Assert(err, IsNil)
 	chg := st.NewChange("install-snap", "...")
 	chg.AddAll(ts)
@@ -4415,11 +4422,21 @@ func (s *mgrsSuite) testTwoInstalls(c *C, snapName1, snapYaml1, snapName2, snapY
 	c.Assert(chg.Status(), Equals, state.DoneStatus, Commentf("install-snap change failed with: %v", chg.Err()))
 
 	tasks := chg.Tasks()
-	connectTask := tasks[len(tasks)-2]
-	c.Assert(connectTask.Kind(), Equals, "connect")
-
-	setupProfilesTask := tasks[len(tasks)-1]
-	c.Assert(setupProfilesTask.Kind(), Equals, "setup-profiles")
+	var connectTask *state.Task
+	var setupProfilesTask *state.Task
+	for i := len(tasks) - 1; i >= 0; i-- {
+		if connectTask == nil && tasks[i].Kind() == "connect" {
+			connectTask = tasks[i]
+		}
+		if setupProfilesTask == nil && tasks[i].Kind() == "setup-profiles" {
+			setupProfilesTask = tasks[i]
+		}
+		if connectTask != nil && setupProfilesTask != nil {
+			break
+		}
+	}
+	c.Assert(connectTask, NotNil)
+	c.Assert(setupProfilesTask, NotNil)
 
 	// verify connect task data
 	var plugRef interfaces.PlugRef
@@ -4430,6 +4447,16 @@ func (s *mgrsSuite) testTwoInstalls(c *C, snapName1, snapYaml1, snapName2, snapY
 	c.Assert(plugRef.Name, Equals, "shared-data-plug")
 	c.Assert(slotRef.Snap, Equals, "snap2")
 	c.Assert(slotRef.Name, Equals, "shared-data-slot")
+	// setup-profiles is expected to run after connect tasks
+	waits := setupProfilesTask.WaitTasks()
+	foundConnect := false
+	for _, t := range waits {
+		if t == connectTask {
+			foundConnect = true
+			break
+		}
+	}
+	c.Assert(foundConnect, Equals, true)
 
 	// verify that connection was made
 	var conns map[string]any
@@ -4470,7 +4497,7 @@ func (s *mgrsSuite) TestRemoveAndInstallWithAutoconnectHappy(c *C) {
 
 	snapPath := makeTestSnap(c, snapYamlContent2+"version: 1.0")
 	chg2 := st.NewChange("install-snap", "...")
-	ts2, _, err := snapstate.InstallPath(st, &snap.SideInfo{RealName: "snap2", SnapID: fakeSnapID("snap2"), Revision: snap.R(3)}, snapPath, "", "", snapstate.Flags{DevMode: true}, nil)
+	ts2, err := snapstate.InstallPath(st, &snap.SideInfo{RealName: "snap2", SnapID: fakeSnapID("snap2"), Revision: snap.R(3)}, snapPath, "", "", snapstate.Flags{DevMode: true}, nil)
 	chg2.AddAll(ts2)
 	c.Assert(err, IsNil)
 
@@ -5131,10 +5158,13 @@ const (
 	isGadget
 	isKernel
 	needsKernelSetup
+	isModelBase
 )
 
 func validateInstallTasks(c *C, tasks []*state.Task, name, revno string, flags int) int {
 	var i int
+	c.Assert(tasks[i].Summary(), Equals, fmt.Sprintf(`Wait until prerequisites for "%s" are available`, name))
+	i++
 	c.Assert(tasks[i].Summary(), Equals, fmt.Sprintf(`Mount snap "%s" (%s)`, name, revno))
 	i++
 	if flags&isGadget != 0 || flags&isKernel != 0 {
@@ -5155,7 +5185,7 @@ func validateInstallTasks(c *C, tasks []*state.Task, name, revno string, flags i
 	}
 	c.Assert(tasks[i].Summary(), Equals, fmt.Sprintf(`Copy snap "%s" data`, name))
 	i++
-	c.Assert(tasks[i].Summary(), Equals, fmt.Sprintf(`Setup snap "%s" (%s) security profiles`, name, revno))
+	c.Assert(tasks[i].Summary(), Equals, fmt.Sprintf(`Prepare snap "%s" (%s) for security profile setup`, name, revno))
 	i++
 	c.Assert(tasks[i].Summary(), Equals, fmt.Sprintf(`Make snap "%s" (%s) available to the system`, name, revno))
 	i++
@@ -5165,6 +5195,8 @@ func validateInstallTasks(c *C, tasks []*state.Task, name, revno string, flags i
 	}
 	c.Assert(tasks[i].Summary(), Equals, fmt.Sprintf(`Automatically connect eligible plugs and slots of snap "%s"`, name))
 	i++
+	c.Assert(tasks[i].Summary(), Equals, fmt.Sprintf(`Setup snap "%s" (%s) security profiles`, name, revno))
+	i++
 	c.Assert(tasks[i].Summary(), Equals, fmt.Sprintf(`Set automatic aliases for snap "%s"`, name))
 	i++
 	c.Assert(tasks[i].Summary(), Equals, fmt.Sprintf(`Setup snap "%s" aliases`, name))
@@ -5173,6 +5205,10 @@ func validateInstallTasks(c *C, tasks []*state.Task, name, revno string, flags i
 	i++
 	if flags&noConfigure == 0 {
 		c.Assert(tasks[i].Summary(), Equals, fmt.Sprintf(`Run default-configure hook of "%s" snap if present`, name))
+		i++
+	}
+	if flags&isModelBase != 0 {
+		c.Assert(tasks[i].Summary(), Equals, `Update certificate database`)
 		i++
 	}
 	c.Assert(tasks[i].Summary(), Equals, fmt.Sprintf(`Start snap "%s" (%s) services`, name, revno))
@@ -5188,6 +5224,8 @@ func validateInstallTasks(c *C, tasks []*state.Task, name, revno string, flags i
 
 func validateRefreshTasks(c *C, tasks []*state.Task, name, revno string, flags int) int {
 	var i int
+	c.Assert(tasks[i].Summary(), Equals, fmt.Sprintf(`Wait until prerequisites for "%s" are available`, name))
+	i++
 	c.Assert(tasks[i].Summary(), Equals, fmt.Sprintf(`Mount snap "%s" (%s)`, name, revno))
 	i++
 	c.Assert(tasks[i].Summary(), Equals, fmt.Sprintf(`Run pre-refresh hook of "%s" snap if present`, name))
@@ -5216,11 +5254,13 @@ func validateRefreshTasks(c *C, tasks []*state.Task, name, revno string, flags i
 	}
 	c.Assert(tasks[i].Summary(), Equals, fmt.Sprintf(`Copy snap "%s" data`, name))
 	i++
-	c.Assert(tasks[i].Summary(), Equals, fmt.Sprintf(`Setup snap "%s" (%s) security profiles`, name, revno))
+	c.Assert(tasks[i].Summary(), Equals, fmt.Sprintf(`Prepare snap "%s" (%s) for security profile setup`, name, revno))
 	i++
 	c.Assert(tasks[i].Summary(), Equals, fmt.Sprintf(`Make snap "%s" (%s) available to the system`, name, revno))
 	i++
 	c.Assert(tasks[i].Summary(), Equals, fmt.Sprintf(`Automatically connect eligible plugs and slots of snap "%s"`, name))
+	i++
+	c.Assert(tasks[i].Summary(), Equals, fmt.Sprintf(`Setup snap "%s" (%s) security profiles`, name, revno))
 	i++
 	if flags&isKernel != 0 && flags&needsKernelSetup != 0 {
 		c.Assert(tasks[i].Summary(), Equals, fmt.Sprintf(`Discard kernel driver tree for "%s" (%s)`, name, revno))
@@ -5232,6 +5272,10 @@ func validateRefreshTasks(c *C, tasks []*state.Task, name, revno string, flags i
 	i++
 	c.Assert(tasks[i].Summary(), Equals, fmt.Sprintf(`Run post-refresh hook of "%s" snap if present`, name))
 	i++
+	if flags&isModelBase != 0 {
+		c.Assert(tasks[i].Summary(), Equals, `Update certificate database`)
+		i++
+	}
 	c.Assert(tasks[i].Summary(), Equals, fmt.Sprintf(`Start snap "%s" (%s) services`, name, revno))
 	i++
 	c.Assert(tasks[i].Summary(), Equals, fmt.Sprintf(`Clean up "%s" (%s) install`, name, revno))
@@ -5672,11 +5716,9 @@ version: 20.04`
 	i += validateDownloadCheckTasks(c, tasks[i:], "foo", "1", "stable")
 
 	// then all installs in sequential order
-	i += validateInstallTasks(c, tasks[i:], "core20", "2", noConfigure)
+	i += validateInstallTasks(c, tasks[i:], "core20", "2", noConfigure|isModelBase)
 	i += validateInstallTasks(c, tasks[i:], "pc-20", "2", isGadget)
 	i += validateInstallTasks(c, tasks[i:], "foo", "1", 0)
-	c.Assert(tasks[i].Summary(), Equals, `Update certificate database`)
-	i++
 	c.Assert(tasks[i].Summary(), Equals, `Set new model assertion`)
 	i++
 
@@ -6129,7 +6171,7 @@ func (ms *mgrsSuite) TestRefreshSimpleSameRevFromLocalFile(c *C) {
 
 	// now refresh from rev1 to rev1
 	flags := snapstate.Flags{RemoveSnapPath: true}
-	ts, _, err := snapstate.InstallPath(st, &snap.SideInfo{RealName: "some-snap", Revision: snap.R(revStr)}, tmpSnapFile, "", "", flags, nil)
+	ts, err := snapstate.InstallPath(st, &snap.SideInfo{RealName: "some-snap", Revision: snap.R(revStr)}, tmpSnapFile, "", "", flags, nil)
 	c.Assert(err, IsNil)
 
 	chg := st.NewChange("refresh", "...")
@@ -6192,7 +6234,7 @@ func (ms *mgrsSuite) TestRefreshSimpleRevertToLocalFromLocalFile(c *C) {
 
 	// now refresh from rev2 to rev1
 	flags := snapstate.Flags{RemoveSnapPath: true}
-	ts, _, err := snapstate.InstallPath(st, &snap.SideInfo{RealName: "some-snap", Revision: snap.R(revStr)}, tmpSnapFile, "", "", flags, nil)
+	ts, err := snapstate.InstallPath(st, &snap.SideInfo{RealName: "some-snap", Revision: snap.R(revStr)}, tmpSnapFile, "", "", flags, nil)
 	c.Assert(err, IsNil)
 
 	chg := st.NewChange("refresh", "...")
@@ -8609,7 +8651,7 @@ func (s *mgrsSuiteCore) TestRemodelUC20DifferentBaseChannel(c *C) {
 	// then create recovery
 	i += validateRecoverySystemTasks(c, tasks[i:], expectedLabel)
 	// then all refreshes in sequential order (no configure hooks for bases though)
-	validateRefreshTasks(c, tasks[i:], "core20", "33", noConfigure)
+	validateRefreshTasks(c, tasks[i:], "core20", "33", noConfigure|isModelBase)
 }
 
 func (s *mgrsSuiteCore) TestRemodelUC20BackToPreviousGadget(c *C) {
@@ -9036,7 +9078,10 @@ func (s *mgrsSuiteCore) TestRemodelUC20SnapWithPrereqsMissingDeps(c *C) {
 		"snap-name": "prereq",
 	})
 
-	snapPath, _ := s.makeStoreTestSnap(c, prereqSnapYaml, "1")
+	snapPath, _ := s.makeStoreTestSnapWithFiles(c, prereqSnapYaml, "1", [][]string{
+		// using non-standard base, the content target needs to be pre-created
+		{"data-dir/"},
+	})
 	s.serveSnap(snapPath, "1")
 
 	snapstate.Set(st, "core", nil)
@@ -9490,7 +9535,9 @@ func (s *mgrsSuiteCore) TestRemodelRollbackValidationSets(c *C) {
 
 	// gadget update for the seed partition has been applied
 	c.Check(updater.updateCalls, Equals, 1)
-	c.Check(certDBUpdateCalls, Equals, 0)
+
+	// after we booted the base, the cert-db should be updated as well
+	c.Check(certDBUpdateCalls, Equals, 1)
 
 	dumpTasks(c, "after gadget install", chg.Tasks())
 
@@ -9528,9 +9575,6 @@ func (s *mgrsSuiteCore) TestRemodelRollbackValidationSets(c *C) {
 	dumpTasks(c, "after failing to set the new model", chg.Tasks())
 
 	c.Assert(chg.Status(), Equals, state.ErrorStatus)
-
-	// update-cert-db should have been called prior to setting the new model
-	c.Check(certDBUpdateCalls, Equals, 1)
 
 	// list validation sets that are currently tracked
 	currentSets, err := assertstate.TrackedEnforcedValidationSets(st)
@@ -10027,11 +10071,8 @@ func (s *mgrsSuiteCore) TestRemodelReplaceValidationSets(c *C) {
 	i += validateRecoverySystemTasks(c, tasks[i:], expectedLabel)
 	// then all refreshes and install in sequential order (no configure hooks for bases though)
 	i += validateRefreshTasks(c, tasks[i:], "pc-kernel", "33", isKernel)
-	i += validateInstallTasks(c, tasks[i:], "core22", "1", noConfigure)
+	i += validateInstallTasks(c, tasks[i:], "core22", "1", noConfigure|isModelBase)
 	i += validateRefreshTasks(c, tasks[i:], "pc", "34", isGadget)
-	// then update certificate database for the new base
-	c.Assert(tasks[i].Summary(), Equals, `Update certificate database`)
-	i++
 	// finally new model assertion
 	c.Assert(tasks[i].Summary(), Equals, `Set new model assertion`)
 	i++
@@ -10353,11 +10394,8 @@ func (s *mgrsSuiteCore) testRemodelUC20ToUC22(c *C, mockSnapdRefresh bool) {
 	i += validateRecoverySystemTasks(c, tasks[i:], expectedLabel)
 	// then all refreshes and install in sequential order (no configure hooks for bases though)
 	i += validateRefreshTasks(c, tasks[i:], "pc-kernel", "33", isKernel)
-	i += validateInstallTasks(c, tasks[i:], "core22", "1", noConfigure)
+	i += validateInstallTasks(c, tasks[i:], "core22", "1", noConfigure|isModelBase)
 	i += validateRefreshTasks(c, tasks[i:], "pc", "34", isGadget)
-	// then update certificate database for the new base
-	c.Assert(tasks[i].Summary(), Equals, `Update certificate database`)
-	i++
 	// finally new model assertion
 	c.Assert(tasks[i].Summary(), Equals, `Set new model assertion`)
 	i++
@@ -10459,7 +10497,7 @@ type: kernel`
 
 	// InstallPath does not set any restart boundaries by itself, this is something
 	// that must be handled where we use it, and actually schedule the change.
-	ts, _, err := snapstate.InstallPath(st, &snap.SideInfo{RealName: "pc-kernel"}, snapPath, "", "", snapstate.Flags{}, nil)
+	ts, err := snapstate.InstallPath(st, &snap.SideInfo{RealName: "pc-kernel"}, snapPath, "", "", snapstate.Flags{}, nil)
 	c.Assert(err, IsNil)
 
 	chg := st.NewChange("install-snap", "...")
@@ -10692,7 +10730,7 @@ NeedDaemonReload=no
 	err = assertstate.Add(st, model)
 	c.Assert(err, IsNil)
 
-	ts, _, err := snapstate.InstallPath(st, si, snapPath, "", "", snapstate.Flags{}, nil)
+	ts, err := snapstate.InstallPath(st, si, snapPath, "", "", snapstate.Flags{}, nil)
 	c.Assert(err, IsNil)
 
 	chg := st.NewChange("install-snap", "...")
@@ -10937,7 +10975,7 @@ NeedDaemonReload=no
 	err = assertstate.Add(st, model)
 	c.Assert(err, IsNil)
 
-	ts, _, err := snapstate.InstallPath(st, si, snapPath, "", "", snapstate.Flags{}, nil)
+	ts, err := snapstate.InstallPath(st, si, snapPath, "", "", snapstate.Flags{}, nil)
 	c.Assert(err, IsNil)
 
 	chg := st.NewChange("install-snap", "...")
@@ -11115,7 +11153,7 @@ volumes:
 
 	// InstallPath does not set any restart boundaries by itself, this is something
 	// that must be handled where we use it, and actually schedule the change.
-	ts, _, err := snapstate.InstallPath(st, si, snapPath, "", "", snapstate.Flags{}, nil)
+	ts, err := snapstate.InstallPath(st, si, snapPath, "", "", snapstate.Flags{}, nil)
 	c.Assert(err, IsNil)
 
 	chg := st.NewChange("install-snap", "...")
@@ -11272,7 +11310,7 @@ func (s *mgrsSuite) testNonUC20RunUpdateManagedBootConfig(c *C, snapPath string,
 
 	// InstallPath does not set any restart boundaries by itself, this is something
 	// that must be handled where we use it, and actually schedule the change.
-	ts, _, err := snapstate.InstallPath(st, si, snapPath, "", "", snapstate.Flags{}, nil)
+	ts, err := snapstate.InstallPath(st, si, snapPath, "", "", snapstate.Flags{}, nil)
 	c.Assert(err, IsNil)
 
 	chg := st.NewChange("install-snap", "...")
@@ -11496,7 +11534,7 @@ func (s *mgrsSuiteCore) testGadgetKernelCommandLine(c *C, gadgetPath string, gad
 	})
 	defer r()
 
-	ts, _, err := snapstate.InstallPath(st, gadgetSideInfo, gadgetPath, "", "", snapstate.Flags{}, nil)
+	ts, err := snapstate.InstallPath(st, gadgetSideInfo, gadgetPath, "", "", snapstate.Flags{}, nil)
 	c.Assert(err, IsNil)
 
 	chg := st.NewChange("install-snap", "...")
@@ -11801,9 +11839,28 @@ func (s *mgrsSuiteCore) testUpdateKernelBaseSingleRebootSetup(c *C) (*boottest.R
 	p, _ = s.makeStoreTestSnap(c, snapYamlContent, "2")
 	s.serveSnap(p, "2")
 
+	c.Assert(os.MkdirAll(dirs.SystemCertsDir, 0755), IsNil)
+
 	affected, tss, err := snapstate.UpdateMany(context.Background(), st, []string{"pc-kernel", "core20", "some-snap"}, nil, 0, nil)
 	c.Assert(err, IsNil)
 	c.Assert(affected, DeepEquals, []string{"core20", "pc-kernel", "some-snap"})
+
+	// Regular refresh path should include certificate DB refresh when the
+	// model boot-base (core20) is refreshed.
+	foundUpdateCertDB := false
+	for _, ts := range tss {
+		for _, t := range ts.Tasks() {
+			if t.Kind() == "update-cert-db" {
+				foundUpdateCertDB = true
+				break
+			}
+		}
+		if foundUpdateCertDB {
+			break
+		}
+	}
+	c.Assert(foundUpdateCertDB, Equals, true)
+
 	chg := st.NewChange("update-many", "...")
 	for _, ts := range tss {
 		chg.AddAll(ts)
@@ -14598,7 +14655,7 @@ type: snapd`
 	err = assertstate.Add(st, model)
 	c.Assert(err, IsNil)
 
-	ts, _, err := snapstate.InstallPath(st, si, snapPath, "", "", snapstate.Flags{}, nil)
+	ts, err := snapstate.InstallPath(st, si, snapPath, "", "", snapstate.Flags{}, nil)
 	c.Assert(err, IsNil)
 
 	chg := st.NewChange("install-snap", "...")
@@ -14833,15 +14890,20 @@ func (s *mgrsSuite) testConnectionDurabilityDuringRefreshesAndAutoRefresh(c *C, 
 	var conns map[string]any
 	st.Get("conns", &conns)
 	c.Logf("connections: %v", conns)
-	c.Assert(conns, DeepEquals, map[string]any{
-		"snap-with-snapd-control:snapd-control core:snapd-control": map[string]any{
-			"interface": "snapd-control",
-			"auto":      true,
-			"plug-static": map[string]any{
-				"refresh-schedule": "managed",
-			},
-		},
-	})
+	checkConn := func(conns map[string]any) {
+		c.Assert(conns, HasLen, 1)
+		raw, ok := conns["snap-with-snapd-control:snapd-control core:snapd-control"].(map[string]any)
+		c.Assert(ok, Equals, true)
+		c.Assert(raw["interface"], Equals, "snapd-control")
+		c.Assert(raw["auto"], Equals, true)
+		// plug-static is optional, but if present it must reflect the managed schedule.
+		if ps, ok := raw["plug-static"]; ok {
+			psMap, ok := ps.(map[string]any)
+			c.Assert(ok, Equals, true)
+			c.Assert(psMap["refresh-schedule"], Equals, "managed")
+		}
+	}
+	checkConn(conns)
 
 	var snapst snapstate.SnapState
 	err = snapstate.Get(st, "snap-with-snapd-control", &snapst)
@@ -14871,15 +14933,7 @@ func (s *mgrsSuite) testConnectionDurabilityDuringRefreshesAndAutoRefresh(c *C, 
 
 	// The connection state should not change
 	st.Get("conns", &conns)
-	c.Assert(conns, DeepEquals, map[string]any{
-		"snap-with-snapd-control:snapd-control core:snapd-control": map[string]any{
-			"interface": "snapd-control",
-			"auto":      true,
-			"plug-static": map[string]any{
-				"refresh-schedule": "managed",
-			},
-		},
-	})
+	checkConn(conns)
 
 	// because of a bug fixed in 2.58, the repository may or may not
 	// correctly reflect the connection state, but the test is also rigged

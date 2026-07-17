@@ -23,6 +23,7 @@ package secboot
 import (
 	"bytes"
 	"crypto/rand"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -37,7 +38,6 @@ import (
 	sb_efi "github.com/snapcore/secboot/efi"
 	sb_preinstall "github.com/snapcore/secboot/efi/preinstall"
 	sb_tpm2 "github.com/snapcore/secboot/tpm2"
-	"golang.org/x/xerrors"
 
 	"github.com/snapcore/snapd/asserts"
 	"github.com/snapcore/snapd/bootloader"
@@ -82,7 +82,8 @@ var (
 	tpmReleaseResources     = tpmReleaseResourcesImpl
 	tpmGetCapabilityHandles = (*sb_tpm2.Connection).GetCapabilityHandles
 
-	sbTPMDictionaryAttackLockReset = (*sb_tpm2.Connection).DictionaryAttackLockReset
+	sbTPMResetDictionaryAttackLockWithAuthValue = (*sb_tpm2.Connection).ResetDictionaryAttackLockWithAuthValue
+	sbTPMResetDictionaryAttackLock              = (*sb_tpm2.Connection).ResetDictionaryAttackLock
 
 	sbUpdateKeyDataPCRProtectionPolicy = sb_tpm2.UpdateKeyDataPCRProtectionPolicy
 
@@ -156,7 +157,7 @@ func measureWhenPossible(whatHow func(tpm *sb_tpm2.Connection) error) error {
 	// the model is ready, we're good to try measuring it now
 	tpm, err := insecureConnectToTPM()
 	if err != nil {
-		if xerrors.Is(err, sb_tpm2.ErrNoTPM2Device) {
+		if errors.Is(err, sb_tpm2.ErrNoTPM2Device) {
 			return nil
 		}
 		return fmt.Errorf("cannot open TPM connection: %v", err)
@@ -205,7 +206,7 @@ func MeasureSnapModelWhenPossible(findModel func() (*asserts.Model, error)) erro
 func lockTPMSealedKeys() error {
 	tpm, tpmErr := sbConnectToDefaultTPM()
 	if tpmErr != nil {
-		if xerrors.Is(tpmErr, sb_tpm2.ErrNoTPM2Device) {
+		if errors.Is(tpmErr, sb_tpm2.ErrNoTPM2Device) {
 			logger.Noticef("cannot open TPM connection: %v", tpmErr)
 			return nil
 		}
@@ -427,7 +428,7 @@ func ProvisionTPM(mode TPMProvisionMode, lockoutAuthFile string) error {
 func ProvisionForCVM(initramfsUbuntuSeedDir string) error {
 	tpm, err := insecureConnectToTPM()
 	if err != nil {
-		if xerrors.Is(err, sb_tpm2.ErrNoTPM2Device) {
+		if errors.Is(err, sb_tpm2.ErrNoTPM2Device) {
 			return nil
 		}
 		return fmt.Errorf("cannot open TPM connection: %v", err)
@@ -453,7 +454,7 @@ func ProvisionForCVM(initramfsUbuntuSeedDir string) error {
 		return fmt.Errorf("cannot read SRK template: %v", err)
 	}
 
-	err = sbTPMEnsureProvisioned(tpm, sb_tpm2.ProvisionWithoutLockout(), sbWithCustomSRKTemplate(srkTmpl))
+	err = sbTPMEnsureProvisioned(tpm, sbWithCustomSRKTemplate(srkTmpl))
 	if err != nil && err != sb_tpm2.ErrTPMProvisioningRequiresLockout {
 		return fmt.Errorf("cannot prepare TPM: %v", err)
 	}
@@ -680,6 +681,8 @@ type resealKeysWithTPMParams struct {
 	Keys []KeyDataLocation
 	// The primary key
 	PrimaryKey []byte
+	// DryRun validates resealing without persisting updated key material.
+	DryRun bool
 }
 
 // resealKeysWithTPMImpl updates the PCR protection policy for the sealed encryption keys
@@ -739,6 +742,9 @@ func resealKeysWithTPMImpl(params *resealKeysWithTPMParams, newPCRPolicyVersion 
 		if err := sbUpdateKeyPCRProtectionPolicyMultiple(tpm, sealedKeyObjects, params.PrimaryKey, &pcrProfile); err != nil {
 			return nil, fmt.Errorf("cannot update legacy PCR protection policy: %w", err)
 		}
+		if params.DryRun {
+			return nil, nil
+		}
 
 		// write key files
 		for i, sko := range sealedKeyObjects {
@@ -760,6 +766,9 @@ func resealKeysWithTPMImpl(params *resealKeysWithTPMParams, newPCRPolicyVersion 
 
 		if err := sbUpdateKeyDataPCRProtectionPolicy(tpm, params.PrimaryKey, &pcrProfile, policyVersion, keyDatas...); err != nil {
 			return nil, fmt.Errorf("cannot update PCR protection policy: %w", err)
+		}
+		if params.DryRun {
+			return nil, nil
 		}
 
 		for i, key := range params.Keys {
@@ -925,6 +934,7 @@ func buildPCRProtectionProfileLegacy(modelParams []*SealKeyModelParams, allowIns
 
 		var options []sb_efi.PCRProfileOption
 		options = append(options,
+			sb_efi.WithAllowSecureBootUserMode(),
 			sb_efi.WithSecureBootPolicyProfile(),
 			sb_efi.WithBootManagerCodeProfile(),
 			sb_efi.WithSignatureDBUpdates(updateDB...),
@@ -1018,36 +1028,64 @@ func BuildPCRProtectionProfile(modelParams []*SealKeyModelParams, checkResult *P
 	return mu.MarshalToBytes(pcrProfile)
 }
 
+func readLockoutAuth(lockoutAuthFile string) (data []byte, isValue bool, err error) {
+	logger.Debugf("using existing lockout authorization")
+	data, err = os.ReadFile(lockoutAuthFile)
+	if err != nil {
+		return nil, false, fmt.Errorf("cannot read existing lockout auth: %v", err)
+	}
+
+	if len(data) == 16 {
+		// This could be an old auth value (not json)
+		jsonTop := make(map[string]any)
+		if err := json.Unmarshal(data, &jsonTop); err != nil {
+			// Not json, definitely!
+			isValue = true
+		} else if _, hasAuthValue := jsonTop["auth-value"]; !hasAuthValue {
+			// Has no field "auth-value"
+			isValue = true
+		} else {
+			// Looks like a valid auth data, so go for that
+			isValue = false
+		}
+	} else {
+		isValue = false
+	}
+
+	return data, isValue, nil
+}
+
 func tpmProvision(tpm *sb_tpm2.Connection, mode TPMProvisionMode, lockoutAuthFile string) error {
-	var currentLockoutAuth []byte
+	var currentAuth sb_tpm2.EnsureProvisionedOption
+
 	if mode == TPMPartialReprovision {
 		logger.Debugf("using existing lockout authorization")
-		d, err := os.ReadFile(lockoutAuthFile)
+		d, isValue, err := readLockoutAuth(lockoutAuthFile)
 		if err != nil {
-			return fmt.Errorf("cannot read existing lockout auth: %v", err)
+			return err
 		}
-		currentLockoutAuth = d
+
+		if isValue {
+			currentAuth = sb_tpm2.WithLockoutAuthValue(d)
+		} else {
+			currentAuth = sb_tpm2.WithLockoutAuthData(d)
+		}
+	} else {
+		currentAuth = sb_tpm2.WithUnconfiguredLockoutAuth()
 	}
-	// Create and save the lockout authorization file
-	lockoutAuth := make([]byte, 16)
-	// crypto rand is protected against short reads
-	_, err := rand.Read(lockoutAuth)
-	if err != nil {
-		return fmt.Errorf("cannot create lockout authorization: %v", err)
-	}
-	if err := osutil.AtomicWriteFile(lockoutAuthFile, lockoutAuth, 0600, 0); err != nil {
-		return fmt.Errorf("cannot write the lockout authorization file: %v", err)
-	}
+
+	newAuth := sb_tpm2.WithProvisionNewLockoutAuthData(rand.Reader, func(newAuthData []byte) error {
+		if err := osutil.AtomicWriteFile(lockoutAuthFile, newAuthData, 0600, 0); err != nil {
+			return fmt.Errorf("cannot write the lockout authorization file: %v", err)
+		}
+		return nil
+	})
 
 	// TODO:UC20: ideally we should ask the firmware to clear the TPM and then reboot
 	//            if the device has previously been provisioned, see
 	//            https://godoc.org/github.com/snapcore/secboot#RequestTPMClearUsingPPI
-	if currentLockoutAuth != nil {
-		// use the current lockout authorization data to authorize
-		// provisioning
-		tpm.LockoutHandleContext().SetAuthValue(currentLockoutAuth)
-	}
-	if err := sbTPMEnsureProvisioned(tpm, sb_tpm2.WithProvisionNewLockoutAuthValue(lockoutAuth)); err != nil {
+
+	if err := sbTPMEnsureProvisioned(tpm, currentAuth, newAuth); err != nil {
 		logger.Noticef("TPM provisioning error: %v", err)
 		return fmt.Errorf("cannot provision TPM: %v", err)
 	}
@@ -1113,20 +1151,25 @@ func releasePCRResourceHandles(handles ...uint32) error {
 }
 
 func resetLockoutCounter(lockoutAuthFile string) error {
+	auth, isValue, err := readLockoutAuth(lockoutAuthFile)
+	if err != nil {
+		return err
+	}
+
 	tpm, err := sbConnectToDefaultTPM()
 	if err != nil {
 		return fmt.Errorf("cannot connect to TPM: %v", err)
 	}
 	defer tpm.Close()
 
-	lockoutAuth, err := os.ReadFile(lockoutAuthFile)
-	if err != nil {
-		return fmt.Errorf("cannot read existing lockout auth: %v", err)
-	}
-	tpm.LockoutHandleContext().SetAuthValue(lockoutAuth)
-
-	if err := sbTPMDictionaryAttackLockReset(tpm, tpm.LockoutHandleContext(), tpm.HmacSession()); err != nil {
-		return err
+	if isValue {
+		if err := sbTPMResetDictionaryAttackLockWithAuthValue(tpm, auth); err != nil {
+			return err
+		}
+	} else {
+		if err := sbTPMResetDictionaryAttackLock(tpm, auth); err != nil {
+			return err
+		}
 	}
 
 	return nil
@@ -1399,20 +1442,10 @@ func FindFreeHandle() (uint32, error) {
 }
 
 // AddContainerRecoveryKey adds a new TPM protected key to specified device.
-//
-// Note: The unlock and primary keys are implicitly obtained from the kernel
-// keyring so this will not work if the disk was unlocked with a recovery key
-// during boot.
 func AddContainerTPMProtectedKey(devicePath, slotName string, params *ProtectKeyParams) (err error) {
 	var pcrProfile sb_tpm2.PCRProtectionProfile
 	if _, err := mu.UnmarshalFromBytes(params.PCRProfile, &pcrProfile); err != nil {
 		return fmt.Errorf("cannot unmarshal PCR profile: %v", err)
-	}
-
-	// this will fail if the disk was unlocked with a recovery key during boot.
-	primaryKey, err := sbGetPrimaryKeyFromKernel(defaultKeyringPrefix, devicePath, false)
-	if err != nil {
-		return fmt.Errorf("cannot get primary key from kernel keyring for unlocked disk %s: %v", devicePath, err)
 	}
 
 	unlockKey, err := sbGetDiskUnlockKeyFromKernel(defaultKeyringPrefix, devicePath, false)
@@ -1433,7 +1466,7 @@ func AddContainerTPMProtectedKey(devicePath, slotName string, params *ProtectKey
 		PCRProfile:             &pcrProfile,
 		Role:                   params.KeyRole,
 		PCRPolicyCounterHandle: tpm2.Handle(params.PCRPolicyCounterHandle),
-		PrimaryKey:             primaryKey,
+		PrimaryKey:             params.PrimaryKey,
 	}
 
 	protectedKey, _, newKey, err := newTPMProtectedKey(tpm, creationParams, params.VolumesAuth)

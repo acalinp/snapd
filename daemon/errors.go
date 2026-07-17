@@ -31,6 +31,7 @@ import (
 	"github.com/snapcore/snapd/overlord/fdestate"
 	"github.com/snapcore/snapd/overlord/servicestate"
 	"github.com/snapcore/snapd/overlord/snapstate"
+	"github.com/snapcore/snapd/seclog"
 	"github.com/snapcore/snapd/snap"
 	"github.com/snapcore/snapd/store"
 )
@@ -44,6 +45,15 @@ type apiError struct {
 	// Kind is the error kind. See client/errors.go
 	Kind  client.ErrorKind
 	Value errorValue
+}
+
+// seclogReason returns a [seclog.Reason] derived from the API error fields.
+func (ae *apiError) seclogReason() seclog.Reason {
+	return seclog.Reason{
+		Code:    ae.Status,
+		Kind:    string(ae.Kind),
+		Message: ae.Message,
+	}
 }
 
 func (ae *apiError) Error() string {
@@ -208,6 +218,26 @@ func SnapRevisionNotAvailable(snapName string, rnaErr *store.RevisionNotAvailabl
 		Status:  404,
 		Message: msg,
 		Kind:    kind,
+		Value:   value,
+	}
+}
+
+// AlreadyInstalled is an error responder used when an install command
+// attempts to installed snaps/components that are already installed.
+func AlreadyInstalled(aie *snap.AlreadyInstalledError) *apiError {
+	value := map[string]any{}
+	if len(aie.Snaps) > 0 {
+		value["snaps"] = aie.Snaps
+	}
+
+	if len(aie.Components) > 0 {
+		value["components"] = aie.Components
+	}
+
+	return &apiError{
+		Status:  400,
+		Message: aie.Error(),
+		Kind:    client.ErrorKindSnapAlreadyInstalled,
 		Value:   value,
 	}
 }
@@ -377,8 +407,7 @@ func errToResponse(err error, snaps []string, fallback errorResponder, format st
 				return InternalError("store.RevisionNotAvailable with %d snaps", len(snaps))
 			}
 		case *snap.AlreadyInstalledError:
-			kind = client.ErrorKindSnapAlreadyInstalled
-			snapName = err.Snap
+			return AlreadyInstalled(err)
 		case *snap.NotInstalledError:
 			kind = client.ErrorKindSnapNotInstalled
 			snapName = err.Snap

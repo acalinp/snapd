@@ -671,6 +671,18 @@ func (b *Backend) deriveContent(spec *Specification, appSet *interfaces.SnapAppS
 	content = make(map[string]osutil.FileState, len(runnables))
 	snapInfo := appSet.Info()
 
+	// add base snippets to the spec, unless it's a strict snap in devmode or a
+	// classic snap without a jail. These will be present in the final profile
+	// if no interface overrides them with a more specific snippet of the same
+	// key
+	if (!opts.Classic && !opts.DevMode) || opts.JailMode {
+		for key, snippet := range basePrioritizedSnippets {
+			// TODO: pass confinement flags down if snippets need to be
+			// added conditionally
+			spec.AddBasePrioritizedSnippet(snippet, key)
+		}
+	}
+
 	// Add profile for apps and hooks.
 	for _, r := range runnables {
 		b.addContent(r.SecurityTag, snapInfo, r.CommandName, opts, spec.SnippetForTag(r.SecurityTag), content, spec)
@@ -883,6 +895,10 @@ func (b *Backend) addContent(securityTag string, snapInfo *snap.Info, cmdName st
   # to the actual snap-confine profile
   /usr/bin/snap ixr,
   /snap/{snapd,core}/*/usr/bin/snap ixr,
+  # allow executing snapd binary through a symlink. snapd implements the actual
+  # usr/bin/snap functionality
+  /usr/lib{,exec}/snapd/snapd ixr,
+  /snap/{snapd,core}/*/usr/lib/snapd/snapd ixr,
 
   # allow transitioning to snap-confine to support executing strict snaps from
   # inside devmode confined snaps

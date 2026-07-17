@@ -24,8 +24,6 @@ backends:
             - debian-12-64:
             - debian-sid-64:
             - arch-linux-64:
-            - amazon-linux-2-64:
-                storage: preserve-size
             - amazon-linux-2023-64:
                 storage: preserve-size
             - centos-9-64:
@@ -77,8 +75,8 @@ backends:
             - ubuntu-26.04-64:
                 image: snapd-spread/ubuntu-26.04-64
 
-            - fedora-42-64:
-                image: snapd-spread/fedora-42-64
+            - fedora-44-64:
+                image: snapd-spread/fedora-44-64
             - opensuse-15.6-64:
                 image: snapd-spread/opensuse-15.6-64
             - opensuse-tumbleweed-64:

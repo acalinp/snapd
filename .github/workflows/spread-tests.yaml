@@ -15,10 +15,6 @@ on:
         description: 'The spread backend to use (for possible values, check spread.yaml). This cannot be empty'
         required: true
         type: string
-      alternative-backend:
-        description: 'The spread backend to use when the backend cannot be used'
-        required: false
-        type: string
       systems:
         description: 'The spread system(s) to use (for possible values, check spread.yaml). If more than one, separate them with a space. To run all, write ALL. To run none, write NONE'
         required: true
@@ -62,6 +58,25 @@ on:
 
 jobs:
   run-spread:
+    # A job-level `permissions:` block fully overrides the caller workflow's
+    # grant: any scope not listed here is reset to `none`, even if the caller
+    # granted it. List every scope this reusable job actually uses:
+    #   contents:      checkout, `gh api repos/.../rules/branches/master`
+    #   pull-requests: `gh pr view --json body/labels` (PR metadata in a
+    #                  private repo)
+    #   actions:       `listWorkflowRunArtifacts` / `downloadArtifact` in
+    #                  "Download and extract pre-built packages if they exist"
+    #                  and the cross-attempt `download-artifact` restore
+    #   packages:      ghcr.io image pulls used by setup actions and
+    #                  download-snapd-snap
+    # Callers must also grant these at workflow level (see ci-test.yaml,
+    # ci-release.yaml), because reusable workflows cannot elevate caller
+    # scopes.
+    permissions:
+      contents: read
+      packages: read
+      pull-requests: read
+      actions: read
     env:
       SPREAD_EXPERIMENTAL_FEATURES: ${{ inputs.spread-experimental-features }}
       GH_TOKEN: ${{ github.token }}
@@ -109,7 +124,7 @@ jobs:
     - name: Set PR labels as environment variables
       if: ${{ github.event.pull_request.number }}
       run: |
-          labels=$(gh pr view ${{ github.event.pull_request.number }} --repo github.com/canonical/snapd --json labels | jq -r '.labels[].name')
+          labels=$(gh pr view ${{ github.event.pull_request.number }} --json labels | jq -r '.labels[].name')
           if grep -q '^Skip spread$' <<<$labels; then
             echo "SKIP_SPREAD_LABEL=true" >> $GITHUB_ENV
           fi
@@ -199,14 +214,7 @@ jobs:
             echo "$TASKS_TO_RUN"
           }
 
-          # Determine if the alternative backend has to be used for the current group
-          # Alternative backends usage depends on the value stored in the file USE_ALTERNATIVE_BACKEND,
-          # where it is defined the backend to use when images are ready in both google and openstack.
-          USE_ALTERNATIVE_BACKEND="$(curl -s https://storage.googleapis.com/snapd-spread-tests/snapd-tests/ci/use_alternative_backend.json)"
           SPREAD_BACKEND="${{ inputs.backend }}"
-          if [ -n "${{ inputs.alternative-backend }}" ] && [ $(jq -r ".\"${{ inputs.group }}\"" <<< "$USE_ALTERNATIVE_BACKEND") == true ]; then
-              SPREAD_BACKEND="${{ inputs.alternative-backend }}"
-          fi
           echo SPREAD_BACKEND="$SPREAD_BACKEND" >> $GITHUB_ENV
 
           CHANGES_PARAM=""
@@ -372,7 +380,7 @@ jobs:
       if: ${{ env.SKIP_SPREAD_LABEL != 'true' && env.RUN_TESTS == 'true' }}
       env:
         SYSTEMS: ${{ inputs.systems }}
-      uses: actions/github-script@v8
+      uses: actions/github-script@v9
       with:
         script: |
           let fs = require('fs');
@@ -381,11 +389,21 @@ jobs:
           let child_process = require('child_process');
           let systems = process.env.SYSTEMS.split(' ');
 
-          let allArtifacts = await github.rest.actions.listWorkflowRunArtifacts({
-            owner: context.repo.owner,
-            repo: context.repo.repo,
-            run_id: context.runId,
-          });
+          let page = 1;
+          let per_page = 100;
+          let allArtifacts = [];
+          let response;
+          do {
+            response = await github.rest.actions.listWorkflowRunArtifacts({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              run_id: context.runId,
+              per_page: per_page,
+              page: page
+            });
+            allArtifacts = allArtifacts.concat(response.data.artifacts);
+            page++;
+          } while (allArtifacts.length < response.data.total_count);
           
           for (let system of systems) {
             let artifactName = `package-${system}`;
@@ -395,7 +413,7 @@ jobs:
               const arch = match[2] || '';
               artifactName = `package-ubuntu-${version}.04${arch}-64`;
             }
-            let artifact = allArtifacts.data.artifacts.find(a => a.name === artifactName);
+            let artifact = allArtifacts.find(a => a.name === artifactName);
             if (!artifact) {
               console.log(`Artifact not found for system: ${system}`);
               continue;
@@ -492,7 +510,8 @@ jobs:
           # undesired changes elsewhere
           echo "Running command: $SPREAD $TESTS_TO_RUN"
           (
-            set -o pipefail 
+            set -o pipefail
+            setarch --addr-no-randomize -- \
             $SPREAD $SPREAD_FLAGS $TESTS_TO_RUN | \
               ./tests/lib/external/snapd-testing-tools/utils/log-filter $FILTER_PARAMS | \
               tee spread.log
@@ -636,7 +655,7 @@ jobs:
             echo "Results sent successfully"
 
             echo "Getting predictions for failed tests"
-            wget -q -O predict https://raw.githubusercontent.com/canonical/snapd-testing/master/ai/test-predictor/client/predict
+            wget -q -O predict https://raw.githubusercontent.com/canonical/snapd-testing/master/ai/test-predictor/src/client/predict
             chmod +x predict
             ./predict results.json
         else

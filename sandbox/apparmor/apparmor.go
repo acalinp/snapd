@@ -325,6 +325,7 @@ func setupConfCacheDirs(newrootdir string) {
 	CacheDir = filepath.Join(newrootdir, "/var/cache/apparmor")
 	hostAbi30File = filepath.Join(newrootdir, "/etc/apparmor.d/abi/3.0")
 	hostAbi40File = filepath.Join(newrootdir, "/etc/apparmor.d/abi/4.0")
+	hostAbi50File = filepath.Join(newrootdir, "/etc/apparmor.d/abi/5.0")
 
 	SystemCacheDir = filepath.Join(ConfDir, "cache")
 	exists, isDir, _ := osutil.DirExists(SystemCacheDir)
@@ -555,11 +556,6 @@ var (
 	// system, use a predictable search path for finding the parser.
 	parserSearchPath = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
-	// Filesystem root defined locally to avoid dependency on the
-	// 'dirs' package
-	// TODO: replace rootPath with dirs.GlobalRootDir, since dirs is used elsewhere
-	rootPath = "/"
-
 	// hostAbi30File is the path to the apparmor "3.0" ABI file and is typically
 	// /etc/apparmor.d/abi/3.0. It is not present on all systems. It is notably
 	// absent when using apparmor 2.x. The variable reacts to changes to global
@@ -567,6 +563,8 @@ var (
 	hostAbi30File = ""
 	// hostAbi40File is like hostAbi30File but for ABI 4.0
 	hostAbi40File = ""
+	// hostAbi50File is like hostAbi30File but for ABI 5.0
+	hostAbi50File = ""
 )
 
 // Each apparmor feature is manifested as a directory entry.
@@ -575,7 +573,7 @@ const featuresSysPath = "sys/kernel/security/apparmor/features"
 // FeaturesSysDir returns the path to the AppArmor features sysfs, which is
 // /sys/kernel/security/apparmor/features, relative to the current root dir.
 func FeaturesSysDir() string {
-	return filepath.Join(rootPath, featuresSysPath)
+	return filepath.Join(dirs.GlobalRootDir, featuresSysPath)
 }
 
 type appArmorProber interface {
@@ -913,6 +911,7 @@ func AppArmorParser() (cmd *exec.Cmd, internal bool, err error) {
 			prefix := strings.TrimSuffix(path, "apparmor_parser")
 			snapdAbi30File := filepath.Join(prefix, "/apparmor.d/abi/3.0")
 			snapdAbi40File := filepath.Join(prefix, "/apparmor.d/abi/4.0")
+			snapdAbi50File := filepath.Join(prefix, "/apparmor.d/abi/5.0")
 
 			// When using the internal apparmor_parser also use its own
 			// configuration and includes etc plus also ensure we use the 4.0
@@ -923,9 +922,12 @@ func AppArmorParser() (cmd *exec.Cmd, internal bool, err error) {
 			// older apparmor, use that instead so that things
 			// don't generally fail.
 			abiFile := ""
+			fi50, err50 := os.Lstat(snapdAbi50File)
 			fi40, err40 := os.Lstat(snapdAbi40File)
 			fi30, err30 := os.Lstat(snapdAbi30File)
 			switch {
+			case err50 == nil && !fi50.IsDir():
+				abiFile = snapdAbi50File
 			case err40 == nil && !fi40.IsDir():
 				abiFile = snapdAbi40File
 			case err30 == nil && !fi30.IsDir():
@@ -949,7 +951,14 @@ func AppArmorParser() (cmd *exec.Cmd, internal bool, err error) {
 		path := filepath.Join(dir, "apparmor_parser")
 		if _, err := os.Stat(path); err == nil {
 			logger.Debugf("checking distro apparmor_parser at %v", path)
-			// Detect but ignore apparmor 4.0 ABI support.
+
+			// Detect apparmor 5.0 ABI support from the host distribution and use it if available.
+			if fi, err := os.Lstat(hostAbi50File); err == nil && !fi.IsDir() {
+				logger.Debugf("apparmor 5.0 ABI detected")
+				return exec.Command(path, "--policy-features", hostAbi50File), false, nil
+			}
+
+			// Detect but ignore apparmor 4.0 ABI support from the host distribution.
 			//
 			// At present this causes some bugs with mqueue mediation that can
 			// be avoided by pinning to 3.0 (which is also supported on
@@ -1108,13 +1117,5 @@ func MockParserSearchPath(new string) (restore func()) {
 	parserSearchPath = new
 	return func() {
 		parserSearchPath = oldAppArmorParserSearchPath
-	}
-}
-
-func MockFsRootPath(path string) (restorer func()) {
-	old := rootPath
-	rootPath = path
-	return func() {
-		rootPath = old
 	}
 }

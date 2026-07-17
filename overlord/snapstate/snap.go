@@ -46,8 +46,8 @@ import (
 type installContext struct {
 	SkipConfigure       bool
 	NoRestartBoundaries bool
-	FromChange          string
-	DeviceCtx           DeviceContext
+	ConflictOptions
+	DeviceCtx DeviceContext
 }
 
 // snapInstallTaskSet captures the task ranges involved in a snap installation.
@@ -55,7 +55,10 @@ type snapInstallTaskSet struct {
 	ts      *state.TaskSet
 	snapsup *SnapSetup
 
+	prerequisites                       *state.Task
 	beforeLocalSystemModificationsTasks []*state.Task
+	prerequisitesSync                   *state.Task
+	mountSnap                           *state.Task
 	upToLinkSnapAndBeforeReboot         []*state.Task
 	afterLinkSnapAndPostReboot          []*state.Task
 }
@@ -109,12 +112,6 @@ func (sc *snapInstallChoreographer) runRefreshHooks() bool {
 }
 
 func (sc *snapInstallChoreographer) BeforeLocalSystemMod(st *state.State, s *taskChainSpan, ic installContext) ([]*state.Task, error) {
-	prereq := st.NewTask("prerequisites", fmt.Sprintf(
-		i18n.G("Ensure prerequisites for %q are available"), sc.snapsup.InstanceName()))
-	prereq.Set("snap-setup", sc.snapsup)
-	s.AppendWithoutData(prereq)
-	s.UpdateEdge(prereq, BeginEdge)
-
 	var prepare *state.Task
 	// if we have a local revision here we go back to that
 	if sc.snapsup.SnapPath != "" || sc.revisionIsPresent() {
@@ -125,8 +122,8 @@ func (sc *snapInstallChoreographer) BeforeLocalSystemMod(st *state.State, s *tas
 			i18n.G("Download snap %q%s from channel %q"),
 			sc.snapsup.InstanceName(), sc.revisionString(), sc.snapsup.Channel))
 	}
+
 	prepare.Set("snap-setup", sc.snapsup)
-	prepare.WaitFor(prereq)
 	s.AppendWithoutData(prepare)
 	s.UpdateEdge(prepare, SnapSetupEdge)
 	s.UpdateEdge(prepare, LastBeforeLocalModificationsEdge)
@@ -137,7 +134,7 @@ func (sc *snapInstallChoreographer) BeforeLocalSystemMod(st *state.State, s *tas
 	})
 
 	componentTSS, err := splitComponentTasksForInstall(
-		sc.compsups, st, sc.snapst, sc.snapsup, prepare, ic.FromChange)
+		sc.compsups, st, sc.snapst, sc.snapsup, prepare, ic.ConflictOptions)
 	if err != nil {
 		return nil, err
 	}
@@ -162,21 +159,6 @@ func (sc *snapInstallChoreographer) BeforeLocalSystemMod(st *state.State, s *tas
 }
 
 func (sc *snapInstallChoreographer) UpToLinkSnapAndBeforeReboot(st *state.State, s *taskChainSpan, ic installContext) ([]*state.Task, error) {
-	// mount
-	if !sc.revisionIsPresent() {
-		mount := st.NewTask("mount-snap", fmt.Sprintf(
-			i18n.G("Mount snap %q%s"), sc.snapsup.InstanceName(), sc.revisionString()))
-		s.Append(mount)
-	} else if sc.snapsup.Flags.RemoveSnapPath {
-		// If the revision is local, we will not need the temporary snap. This
-		// can happen when e.g. side-loading a local revision again. The
-		// SnapPath is only needed in the "mount-snap" handler and that is
-		// skipped for local revisions.
-		if err := os.Remove(sc.snapsup.SnapPath); err != nil {
-			return nil, err
-		}
-	}
-
 	removeExtraComps, discardExtraComps, err := removeExtraComponentsTasks(st, sc.snapst, sc.snapsup.Revision(), sc.compsups)
 	if err != nil {
 		return nil, err
@@ -248,10 +230,14 @@ func (sc *snapInstallChoreographer) UpToLinkSnapAndBeforeReboot(st *state.State,
 		s.Append(copyData)
 	}
 
-	// security
-	setupSecurity := st.NewTask("setup-profiles", fmt.Sprintf(
-		i18n.G("Setup snap %q%s security profiles"), sc.snapsup.InstanceName(), sc.revisionString()))
-	s.Append(setupSecurity)
+	// Insert the pre-link preparation phase as setup-profiles in
+	// prepare-only mode. This keeps task kinds backward-compatible
+	// for downgrades while preserving the split behavior.
+	prepareSecurity := st.NewTask("setup-profiles", fmt.Sprintf(
+		i18n.G("Prepare snap %q%s for security profile setup"),
+		sc.snapsup.InstanceName(), sc.revisionString()))
+	prepareSecurity.Set("prepare-profiles", true)
+	s.Append(prepareSecurity)
 
 	// finalize (wrappers+current symlink)
 	//
@@ -363,7 +349,33 @@ func removeExtraComponentsTasks(st *state.State, snapst *SnapState, targetRevisi
 	return unlinkTasks, discardTasks, nil
 }
 
+// shouldScheduleUpdateCertDBForRefresh reports whether a snap operation
+// should inject an update-cert-db task.
+func shouldScheduleUpdateCertDBForRefresh(instanceName string, snapType snap.Type, ctx DeviceContext) bool {
+	if snapType != snap.TypeBase {
+		return false
+	}
+
+	model := ctx.Model()
+	if model.Classic() {
+		return false
+	}
+
+	return instanceName == model.Base()
+}
+
 func (sc *snapInstallChoreographer) AfterLinkSnapAndPostReboot(st *state.State, s *taskChainSpan, ic installContext) ([]*state.Task, error) {
+	if sc.snapst.IsInstalled() && sc.snapsup.Type == snap.TypeSnapd && ic.DeviceCtx.HasModeenv() && ic.DeviceCtx.RunMode() {
+		// Ensure that new snapd can reseal with the current version of secboot.
+		// This avoids the situation where we update snapd and then can never
+		// reseal again.
+		checkReseal := st.NewTask("check-reseal", fmt.Sprintf(
+			i18n.G("Validate key resealing for snap %q%s"), sc.snapsup.InstanceName(), sc.revisionString()))
+		checkReseal.Set("finish-restart", true)
+		s.Append(checkReseal)
+		s.UpdateEdge(checkReseal, MaybeRebootWaitEdge)
+	}
+
 	if !sc.requiresKmodSetup() {
 		// Let tasks know if they have to do something about restarts
 		// No kernel modules, reboot after link snap
@@ -385,6 +397,14 @@ func (sc *snapInstallChoreographer) AfterLinkSnapAndPostReboot(st *state.State, 
 		if sc.requiresKmodSetup() {
 			s.UpdateEdge(discardOldKernelSnapSetup, MaybeRebootWaitEdge)
 		}
+	}
+
+	// Refreshing the model base may bring updated system certificates.
+	// Regenerate the managed certificate database as part of the post-reboot
+	// refresh stage for that base.
+	if shouldScheduleUpdateCertDBForRefresh(sc.snapsup.InstanceName(), sc.snapsup.Type, ic.DeviceCtx) {
+		updateCertDB := st.NewTask("update-cert-db", i18n.G("Update certificate database"))
+		s.Append(updateCertDB)
 	}
 
 	if sc.snapsup.QuotaGroupName != "" {
@@ -612,9 +632,48 @@ func (sc *snapInstallChoreographer) addCleanupTasks(st *state.State, s *taskChai
 func (sc *snapInstallChoreographer) choreograph(st *state.State, ic installContext) (snapInstallTaskSet, error) {
 	b := newTaskChainBuilder()
 
+	if sc.revisionIsPresent() && sc.snapsup.RemoveSnapPath {
+		// If the revision is local, we will not need the temporary snap. This
+		// can happen when e.g. side-loading a local revision again. The
+		// SnapPath is only needed in the "mount-snap" handler and that is
+		// skipped for local revisions.
+		if err := os.Remove(sc.snapsup.SnapPath); err != nil {
+			return snapInstallTaskSet{}, err
+		}
+
+		// before snapsup is attached to the tasks, clear it out. a path that
+		// points to nothing isn't useful any more.
+		sc.snapsup.SnapPath = ""
+	}
+
+	prerequisites := st.NewTask("prerequisites", fmt.Sprintf(
+		i18n.G("Ensure prerequisites for %q are available"), sc.snapsup.InstanceName()))
+	prerequisites.Set("snap-setup", sc.snapsup)
+	b.Append(prerequisites)
+	b.UpdateEdge(prerequisites, BeginEdge)
+
+	// the builder chains this phase after the initial prerequisites task.
 	beforeLocalSystemMods, err := sc.BeforeLocalSystemMod(st, b.OpenSpan(), ic)
 	if err != nil {
 		return snapInstallTaskSet{}, err
+	}
+
+	// add a secondary prerequisites task, which will eventually become the
+	// synchronization point that ensures that all prereqs are available before
+	// installing the snap.
+	prerequisitesSync := st.NewTask("prerequisites", fmt.Sprintf(
+		i18n.G("Wait until prerequisites for %q are available"), sc.snapsup.InstanceName()))
+	prerequisitesSync.Set("prerequisites-sync", true)
+	b.Append(prerequisitesSync)
+
+	// mount-snap will be the first task after local modifications, if it is
+	// needed. we keep a pointer to mount-snap specifically so that single-reboot
+	// coordination can orchestrate all mount early in the refresh
+	var mountSnap *state.Task
+	if !sc.revisionIsPresent() {
+		mountSnap = st.NewTask("mount-snap", fmt.Sprintf(
+			i18n.G("Mount snap %q%s"), sc.snapsup.InstanceName(), sc.revisionString()))
+		b.Append(mountSnap)
 	}
 
 	upToLinkSnapAndBeforeReboot, err := sc.UpToLinkSnapAndBeforeReboot(st, b.OpenSpan(), ic)
@@ -637,7 +696,10 @@ func (sc *snapInstallChoreographer) choreograph(st *state.State, ic installConte
 		ts:      b.TaskSet(),
 		snapsup: sc.snapsup,
 
+		prerequisites:                       prerequisites,
 		beforeLocalSystemModificationsTasks: beforeLocalSystemMods,
+		prerequisitesSync:                   prerequisitesSync,
+		mountSnap:                           mountSnap,
 		upToLinkSnapAndBeforeReboot:         upToLinkSnapAndBeforeReboot,
 		afterLinkSnapAndPostReboot:          afterLinkSnapAndPostReboot,
 	}, nil
@@ -739,12 +801,7 @@ func shouldPreDownloadSnap(st *state.State, snapsup *SnapSetup, snapst *SnapStat
 		return nil, nil
 	}
 
-	tr := config.NewTransaction(st)
-	experimentalRefreshAppAwareness, err := features.Flag(tr, features.RefreshAppAwareness)
-	if err != nil && !config.IsNoOption(err) {
-		return nil, err
-	}
-	if !experimentalRefreshAppAwareness || excludeFromRefreshAppAwareness(snapsup.Type) || snapsup.Flags.IgnoreRunning {
+	if excludeFromRefreshAppAwareness(snapsup.Type) || snapsup.Flags.IgnoreRunning {
 		return nil, nil
 	}
 
@@ -795,7 +852,7 @@ func checkInstallPreconditions(st *state.State, snapst *SnapState, snapsup *Snap
 		return err
 	}
 
-	if err := checkChangeConflictIgnoringOneChange(st, snapsup.InstanceName(), snapst, ic.FromChange); err != nil {
+	if err := checkChangeConflictIgnoringOneChange(st, snapsup.InstanceName(), snapst, ic.ConflictOptions); err != nil {
 		return err
 	}
 
@@ -872,11 +929,11 @@ func splitComponentTasksForInstall(
 	snapst *SnapState,
 	snapsup *SnapSetup,
 	snapsupTask *state.Task,
-	fromChange string,
+	copts ConflictOptions,
 ) (multiComponentInstallTaskSet, error) {
 	componentTSS := make([]componentInstallTaskSet, 0, len(compsups))
 	for _, compsup := range compsups {
-		cts, err := doInstallComponent(st, snapst, compsup, snapsup, snapsupTask, nil, nil, fromChange)
+		cts, err := doInstallComponent(st, snapst, compsup, snapsup, snapsupTask, nil, nil, copts)
 		if err != nil {
 			return multiComponentInstallTaskSet{}, fmt.Errorf("cannot install component %q: %v", compsup.CompSideInfo.Component, err)
 		}

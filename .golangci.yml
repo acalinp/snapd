@@ -10,6 +10,7 @@ linters:
     - govet
     - ineffassign
     - misspell
+    - modernize
     - nakedret
     - testpackage
     - unused
@@ -58,6 +59,10 @@ linters:
       simple: true
       range-loops: true
       for-loops: false
+    modernize:
+      disable:
+        - minmax
+        - slicessort
     unparam:
       check-exported: false
   exclusions:
@@ -89,10 +94,13 @@ linters:
         path: arch/arch_test.go
       - linters:
           - testpackage
+        path: asserts/extkeypairmgrimpl_test.go
+      - linters:
+          - testpackage
         path: asserts/findwildcard_test.go
       - linters:
           - testpackage
-        path: cmd/snapctl/main_test.go
+        path: cmd/snapctl/tool/snapctl/main_test.go
       - linters:
           - testpackage
         path: cmd/snap-update-ns/sorting_test.go
@@ -170,6 +178,9 @@ formatters:
   settings:
     gofmt:
       simplify: true
+      rewrite-rules:
+        - pattern: 'interface{}'
+          replacement: 'any'
     goimports:
       local-prefixes:
         - github.com/snapcore/snapd

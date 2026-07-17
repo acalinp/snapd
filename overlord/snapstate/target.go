@@ -37,6 +37,18 @@ import (
 	"github.com/snapcore/snapd/store"
 )
 
+// ConflictOptions contains optional settings for conflict checks triggered by
+// nested operations that were spawned from an existing change.
+type ConflictOptions struct {
+	// FromChange is the change that triggered the operation.
+	FromChange string
+	// DoNotIgnoreFromChangeInTaskConflictCheck makes task-level conflict checks
+	// continue to inspect tasks in FromChange while still ignoring FromChange
+	// for exclusive change conflicts. This is for internal use by nested
+	// operations spawned from an existing change.
+	DoNotIgnoreFromChangeInTaskConflictCheck bool
+}
+
 // Options contains optional parameters for the snapstate operations. All of
 // these fields are optional and can be left unset. The options in this struct
 // apply to all snaps that are part of an operation. Options that apply to
@@ -53,11 +65,13 @@ type Options struct {
 	// track of all snaps (explicitly requested and implicitly required snaps)
 	// that might need to be installed during the operation.
 	PrereqTracker PrereqTracker
-	// FromChange is the change that triggered the operation.
-	FromChange string
+	ConflictOptions
 	// Seed should be true while seeding the device. This indicates that we
 	// shouldn't require that the device is seeded before installing/updating
 	// snaps.
+	//
+	// TODO: we should figure out how to get rid of this flag since we have a
+	// seeding-specific goal
 	Seed bool
 	// ExpectOneSnap is a boolean flag indicating that this operation is expected
 	// to only operate on one snap (excluding any prerequisite snaps that may be
@@ -66,6 +80,8 @@ type Options struct {
 	// pre-existing behavior of calling InstallMany with one snap vs calling
 	// Install.
 	ExpectOneSnap bool
+	// NoSeedRefresh prevents creating seed-refresh tasks for this operation.
+	NoSeedRefresh bool
 }
 
 func (opts *Options) setDefaultLane(st *state.State) error {
@@ -741,6 +757,7 @@ func invalidComponentRevisionError(action, snapName, componentName string, sets 
 func (s *storeInstallGoal) validateAndPrune(st *state.State, installedSnaps map[string]*SnapState, opts Options) error {
 	enforcedSetsFunc := cachedEnforcedValidationSets(st)
 	uninstalled := s.snaps[:0]
+	var alreadyInstalled []string
 	for _, sn := range s.snaps {
 		if err := snap.ValidateInstanceName(sn.InstanceName); err != nil {
 			return fmt.Errorf("invalid instance name: %v", err)
@@ -753,8 +770,12 @@ func (s *storeInstallGoal) validateAndPrune(st *state.State, installedSnaps map[
 		snapst, ok := installedSnaps[sn.InstanceName]
 		if ok && snapst.IsInstalled() {
 			if !sn.SkipIfPresent {
-				return &snap.AlreadyInstalledError{Snap: sn.InstanceName}
+				alreadyInstalled = append(alreadyInstalled, sn.InstanceName)
 			}
+			continue
+		}
+
+		if len(alreadyInstalled) > 0 {
 			continue
 		}
 
@@ -765,7 +786,7 @@ func (s *storeInstallGoal) validateAndPrune(st *state.State, installedSnaps map[
 			sn.RevOpts.Channel = "stable"
 		}
 
-		if err := sn.RevOpts.resolveChannel(sn.InstanceName, "stable", opts.DeviceCtx); err != nil {
+		if err := sn.RevOpts.resolveChannelForStore(sn.InstanceName, "stable", opts.DeviceCtx); err != nil {
 			return err
 		}
 
@@ -774,6 +795,9 @@ func (s *storeInstallGoal) validateAndPrune(st *state.State, installedSnaps map[
 		}
 
 		uninstalled = append(uninstalled, sn)
+	}
+	if len(alreadyInstalled) > 0 {
+		return snap.NewAlreadyInstalledSnapsError(alreadyInstalled)
 	}
 
 	s.snaps = uninstalled
@@ -885,9 +909,9 @@ func InstallWithGoal(ctx context.Context, st *state.State, goal InstallGoal, opt
 		}
 
 		installTS, err := doInstallOrPreDownload(st, &t.snapst, &snapsup, compsups, installContext{
-			FromChange:    opts.FromChange,
-			DeviceCtx:     opts.DeviceCtx,
-			SkipConfigure: opts.Flags.SkipConfigure,
+			ConflictOptions: opts.ConflictOptions,
+			DeviceCtx:       opts.DeviceCtx,
+			SkipConfigure:   opts.Flags.SkipConfigure,
 		})
 		if err != nil {
 			return nil, nil, err
@@ -956,31 +980,33 @@ func setDefaultSnapstateOptions(st *state.State, opts *Options) error {
 	return nil
 }
 
-// pathInstallGoal represents a single snap to be installed from a path on disk.
-type pathInstallGoal struct {
+// seedingGoal represents a single snap to be installed from a path on disk
+// during seeding.
+type seedingGoal struct {
 	snap PathSnap
 }
 
-// PathInstallGoal creates a new InstallGoal to install a snap from a given from
-// a path on disk. If instanceName is not provided, si.RealName will be used.
-func PathInstallGoal(sn PathSnap) InstallGoal {
+// SeedingGoal creates a new InstallGoal to install a snap from a path on disk
+// during seeding. If InstanceName is not provided, SideInfo.RealName will be
+// used.
+func SeedingGoal(sn PathSnap) InstallGoal {
 	if sn.InstanceName == "" {
 		sn.InstanceName = sn.SideInfo.RealName
 	}
 
-	return &pathInstallGoal{
+	return &seedingGoal{
 		snap: sn,
 	}
 }
 
 // toInstall returns the data needed to setup the snap from disk.
-func (p *pathInstallGoal) toInstall(ctx context.Context, st *state.State, opts Options) ([]target, error) {
+func (p *seedingGoal) toInstall(ctx context.Context, st *state.State, opts Options) ([]target, error) {
 	var snapst SnapState
 	if err := Get(st, p.snap.InstanceName, &snapst); err != nil && !errors.Is(err, state.ErrNoState) {
 		return nil, err
 	}
 
-	t, err := targetForPathSnap(p.snap, snapst, opts)
+	t, err := targetFromPathSnap(p.snap, snapst, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -1453,7 +1479,7 @@ func validateAndInitStoreUpdates(st *state.State, allSnaps map[string]*SnapState
 			fallback = "stable"
 		}
 
-		if err := sn.RevOpts.resolveChannel(sn.InstanceName, fallback, opts.DeviceCtx); err != nil {
+		if err := sn.RevOpts.resolveChannelForStore(sn.InstanceName, fallback, opts.DeviceCtx); err != nil {
 			return err
 		}
 
@@ -1559,7 +1585,7 @@ func (p *pathUpdateGoal) toUpdate(_ context.Context, st *state.State, opts Optio
 			return updatePlan{}, err
 		}
 
-		t, err := targetForPathSnap(sn, snapst, opts)
+		t, err := targetFromPathSnap(sn, snapst, opts)
 		if err != nil {
 			return updatePlan{}, err
 		}
@@ -1579,7 +1605,7 @@ func (*pathUpdateGoal) filterGatedSnaps(*state.State, *updatePlan, Options) erro
 	return nil
 }
 
-func targetForPathSnap(update PathSnap, snapst SnapState, opts Options) (target, error) {
+func targetFromPathSnap(update PathSnap, snapst SnapState, opts Options) (target, error) {
 	si := update.SideInfo
 
 	if si.RealName == "" {
@@ -1636,6 +1662,10 @@ func targetForPathSnap(update PathSnap, snapst SnapState, opts Options) (target,
 			SnapPath:  update.Path,
 			Channel:   update.RevOpts.Channel,
 			CohortKey: update.RevOpts.CohortKey,
+
+			// mirror store-backed by-revision refresh: an explicit revision should
+			// run the full update path even if the revision is already current.
+			AlwaysUpdate: !update.RevOpts.Revision.Unset(),
 		},
 		info:       info,
 		snapst:     snapst,

@@ -22,23 +22,34 @@ package daemon
 import (
 	"time"
 
+	"github.com/snapcore/snapd/asserts"
 	"github.com/snapcore/snapd/overlord/fdestate"
 	"github.com/snapcore/snapd/overlord/state"
 	"github.com/snapcore/snapd/testutil"
 )
 
 func MockBuildID(mock string) (restore func()) {
-	old := buildID
-	buildID = mock
+	oldBuildID := buildID
+	r := testutil.Mock(&setBuildID, func() {
+		buildID = mock
+	})
+
 	return func() {
-		buildID = old
+		r()
+		buildID = oldBuildID
 	}
 }
 
 func MockSystemdVirt(newVirt string) (restore func()) {
 	oldVirt := systemdVirt
-	systemdVirt = newVirt
-	return func() { systemdVirt = oldVirt }
+	r := testutil.Mock(&setSystemdDetectVirt, func() {
+		systemdVirt = newVirt
+	})
+
+	return func() {
+		r()
+		systemdVirt = oldVirt
+	}
 }
 
 func MockWarningsAccessors(okay func(*state.State, time.Time) int, all func(*state.State) []*state.Warning, pending func(*state.State) ([]*state.Warning, time.Time)) (restore func()) {
@@ -55,23 +66,11 @@ func MockWarningsAccessors(okay func(*state.State, time.Time) int, all func(*sta
 	}
 }
 
-type (
-	ChangeInfo = changeInfo
-)
-
-func MockSnapstateSnapsAffectedByTask(f func(t *state.Task) ([]string, error)) (restore func()) {
-	old := snapstateSnapsAffectedByTask
-	snapstateSnapsAffectedByTask = f
-	return func() {
-		snapstateSnapsAffectedByTask = old
-	}
-}
-
 func MockSnapdtoolsIsReexecd(f func() (bool, error)) (restore func()) {
 	return testutil.Mock(&snapdtoolIsReexecd, f)
 }
 
-func MockFdestateSystemState(f func(*state.State) (*fdestate.FDESystemState, error)) (restore func()) {
+func MockFdestateSystemState(f func(*state.State, *asserts.Model) (*fdestate.FDESystemState, error)) (restore func()) {
 	old := fdestateSystemState
 	fdestateSystemState = f
 	return func() { fdestateSystemState = old }

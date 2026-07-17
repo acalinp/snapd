@@ -35,21 +35,39 @@ import (
 )
 
 const (
-	// cacheKeyPrefix is the prefix to be concatenated with confdb IDs to form a
-	// cache key used to store pending access data.
-	cacheKeyPrefix = "confdb-accesses-"
+	// pendingCachePrefix is the prefix to be concatenated with confdb IDs to
+	// form a cache key used to store pending access data.
+	pendingCachePrefix = "pending-confdb-"
+
+	// schedulingCachePrefix is the prefix to be concatenated with confdb IDs to
+	// form a cache key used to store access data that was unblocked and is being
+	// scheduled.
+	schedulingCachePrefix = "scheduling-confdb-"
 )
 
-func setupConfdbHook(st *state.State, snapName, hookName string, ignoreError bool) *state.Task {
-	hookSup := &hookstate.HookSetup{
-		Snap:        snapName,
-		Hook:        hookName,
-		Optional:    true,
-		IgnoreError: ignoreError,
-	}
-	summary := fmt.Sprintf(i18n.G("Run hook %s of snap %q"), hookName, snapName)
-	task := hookstate.HookTask(st, summary, hookSup, nil)
-	return task
+// SystemConfdbHandler is implemented by subsystem-specific handlers that
+// process confdb requests for data in "system" confdbs (e.g., validation-sets).
+type SystemConfdbHandler interface {
+	// SchemaName returns the name of the confdb-schema this handler manages.
+	SchemaName() string
+
+	// Commit takes a transaction holding the modified confdb data and makes those
+	// changes effective within the subsystem. It may return task sets that need
+	// to be completed before the commit can be considered done. If no async work
+	// is needed, it returns nil task sets.
+	Commit(st *state.State, tx *Transaction) ([]*state.TaskSet, error)
+
+	// Databag returns a JSONDatabag holding a confdb-acceptable representation
+	// of the data this handler is responsible for.
+	Databag(st *state.State) (confdb.JSONDatabag, error)
+}
+
+// systemHandlers holds handlers for "system" confdb-schemas.
+var systemHandlers = map[string]SystemConfdbHandler{}
+
+// RegisterConfdbHandler registers a handler for a "system" confdb-schema.
+func RegisterConfdbHandler(c SystemConfdbHandler) {
+	systemHandlers[c.SchemaName()] = c
 }
 
 type ConfdbManager struct{}
@@ -87,6 +105,18 @@ func Manager(st *state.State, hookMgr *hookstate.HookManager, runner *state.Task
 	return m
 }
 
+func setupConfdbHook(st *state.State, snapName, hookName string, ignoreError bool) *state.Task {
+	hookSup := &hookstate.HookSetup{
+		Snap:        snapName,
+		Hook:        hookName,
+		Optional:    true,
+		IgnoreError: ignoreError,
+	}
+	summary := fmt.Sprintf(i18n.G("Run hook %s of snap %q"), hookName, snapName)
+	task := hookstate.HookTask(st, summary, hookSup, nil)
+	return task
+}
+
 func (m *ConfdbManager) Ensure() error { return nil }
 
 func (m *ConfdbManager) doCommitTransaction(t *state.Task, _ *tomb.Tomb) (err error) {
@@ -99,11 +129,51 @@ func (m *ConfdbManager) doCommitTransaction(t *state.Task, _ *tomb.Tomb) (err er
 		return err
 	}
 
-	confdbAssert, err := assertstateConfdbSchema(st, tx.ConfdbAccount, tx.ConfdbName)
+	confdbAssert, err := AssertstateConfdbSchema(st, tx.ConfdbAccount, tx.ConfdbName)
 	if err != nil {
 		return err
 	}
 	schema := confdbAssert.Schema().DatabagSchema
+
+	hasSaveViewHook := false
+	for _, task := range t.Change().Tasks() {
+		if task.Kind() != "run-hook" {
+			continue
+		}
+
+		var hooksup hookstate.HookSetup
+		err := task.Get("hook-setup", &hooksup)
+		if err != nil {
+			return fmt.Errorf(`internal error: cannot get "hook-setup" from run-hook task: %w`, err)
+		}
+
+		if strings.HasPrefix(hooksup.Hook, "save-view-") {
+			hasSaveViewHook = true
+			break
+		}
+	}
+
+	// we error early if a write may affect ephemeral data but no save-view hook
+	// is present. However, a change-view hook may have written to an ephemeral
+	// path after that so we have to check again
+	if !hasSaveViewHook {
+		var viewName string
+		err = t.Get("view", &viewName)
+		if err != nil {
+			return fmt.Errorf(`internal error: cannot get "view" from task: %w`, err)
+		}
+
+		view := confdbAssert.Schema().View(viewName)
+		paths := tx.AlteredPaths()
+		mightAffectEph, err := view.WriteAffectsEphemeral(paths)
+		if err != nil {
+			return fmt.Errorf("cannot commit transaction: cannot check for ephemeral paths: %v", err)
+		}
+
+		if mightAffectEph {
+			return fmt.Errorf("cannot commit transaction: write may affect ephemeral data but no save-view hook is present")
+		}
+	}
 
 	return tx.Commit(st, schema)
 }
@@ -123,7 +193,6 @@ func (m *ConfdbManager) clearOngoingTransaction(t *state.Task, _ *tomb.Tomb) err
 		return err
 	}
 
-	// TODO: unblock next waiting confdb writer once we add the blocking logic
 	return nil
 }
 
@@ -159,16 +228,16 @@ func (m *ConfdbManager) doLoadDataIntoChange(t *state.Task, _ *tomb.Tomb) error 
 	if err != nil && !errors.Is(err, state.ErrNoState) {
 		return fmt.Errorf(`internal error: cannot get "constraints" from task: %w`, err)
 	}
-	var userID int
-	err = t.Get("userID", &userID)
+	var userAccess confdb.Access
+	err = t.Get("user-access", &userAccess)
 	if err != nil && !errors.Is(err, state.ErrNoState) {
-		return fmt.Errorf(`internal error: cannot get "userID" from task: %w`, err)
+		return fmt.Errorf(`internal error: cannot get "user-access" from task: %w`, err)
 	}
 
-	return readViewIntoChange(t.Change(), tx, view, requests, cstrs, userID)
+	return readViewIntoChange(t.Change(), tx, view, requests, cstrs, userAccess)
 }
 
-func readViewIntoChange(chg *state.Change, tx *Transaction, view *confdb.View, requests []string, constraints map[string]any, userID int) error {
+func readViewIntoChange(chg *state.Change, tx *Transaction, view *confdb.View, requests []string, constraints map[string]any, userAccess confdb.Access) error {
 	var apiData map[string]any
 	err := chg.Get("api-data", &apiData)
 	if err != nil && !errors.Is(err, state.ErrNoState) {
@@ -179,7 +248,7 @@ func readViewIntoChange(chg *state.Change, tx *Transaction, view *confdb.View, r
 		apiData = make(map[string]any)
 	}
 
-	result, err := GetViaView(tx, view, requests, constraints, userID)
+	result, err := GetViaView(tx, view, requests, constraints, userAccess)
 	if err != nil {
 		if !errors.Is(err, &confdb.NoDataError{}) {
 			// other errors (no match/view) would be detected before the change is created
@@ -202,9 +271,13 @@ type confdbTransactions struct {
 	ReadTxIDs []string `json:"read-tx-ids,omitempty"`
 	WriteTxID string   `json:"write-tx-id,omitempty"`
 
-	// pending holds accesses that are waiting to be scheduled. It's read from
+	// Pending holds accesses that are waiting to be scheduled. It's read from
 	// the state cache so it's only kept in-memory, never persisted into state.
-	pending []pendingAccess
+	Pending []access `json:"-"`
+
+	// Scheduling holds accesses that have been unblocked (moved from pending)
+	// but have not yet finished scheduling tasks/exiting.
+	Scheduling []access `json:"-"`
 }
 
 // CanStartReadTx returns true if there isn't a write transaction running or
@@ -214,7 +287,10 @@ func (txs *confdbTransactions) CanStartReadTx() bool {
 		return false
 	}
 
-	for _, access := range txs.pending {
+	accesses := append([]access{}, txs.Pending...)
+	accesses = append(accesses, txs.Scheduling...)
+
+	for _, access := range accesses {
 		if access.AccessType == writeAccess {
 			return false
 		}
@@ -223,21 +299,32 @@ func (txs *confdbTransactions) CanStartReadTx() bool {
 	return true
 }
 
-// CanStartWriteTx returns true if there is no running or pending transaction.
+// CanStartWriteTx returns true if there is no access currently running or
+// waiting to run.
 func (txs *confdbTransactions) CanStartWriteTx() bool {
-	return txs.WriteTxID == "" && len(txs.ReadTxIDs) == 0 && len(txs.pending) == 0
+	return txs.WriteTxID == "" && len(txs.ReadTxIDs) == 0 &&
+		len(txs.Pending) == 0 && len(txs.Scheduling) == 0
 }
 
 // addReadTransaction adds a read transaction for the specified confdb, if no
-// write transactions is ongoing. The state must be locked by the caller.
-func addReadTransaction(st *state.State, account, confdbName, id string) error {
+// write transactions is ongoing. If a accessID is passed in, it'll be removed
+// from the Scheduling list. The state must be locked by the caller.
+func addReadTransaction(st *state.State, account, confdbName, id, accessID string) error {
 	txs, updateTxStateFunc, err := getOngoingTxs(st, account, confdbName)
 	if err != nil {
 		return err
 	}
 
+	for i, acc := range txs.Scheduling {
+		if acc.ID == accessID {
+			txs.Scheduling = append(txs.Scheduling[:i], txs.Scheduling[i+1:]...)
+			break
+		}
+	}
+
 	if txs.WriteTxID != "" {
-		return fmt.Errorf("cannot read confdb (%s/%s): a write transaction is ongoing", account, confdbName)
+		// shouldn't happen save for programmer error
+		return fmt.Errorf("internal error: cannot read confdb (%s/%s): a write transaction is ongoing", account, confdbName)
 	}
 
 	txs.ReadTxIDs = append(txs.ReadTxIDs, id)
@@ -246,12 +333,20 @@ func addReadTransaction(st *state.State, account, confdbName, id string) error {
 }
 
 // setWriteTransaction sets a write transaction for the specified confdb schema,
-// if no other transactions (read or write) are ongoing. The state must be locked
-// by the caller.
-func setWriteTransaction(st *state.State, account, schemaName, id string) error {
+// if no other transactions (read or write) are ongoing. If a accessID is passed
+// in, it'll be removed from the Scheduling list. The state must be locked by
+// the caller.
+func setWriteTransaction(st *state.State, account, schemaName, id, accessID string) error {
 	txs, updateTxStateFunc, err := getOngoingTxs(st, account, schemaName)
 	if err != nil {
 		return err
+	}
+
+	for i, acc := range txs.Scheduling {
+		if acc.ID == accessID {
+			txs.Scheduling = append(txs.Scheduling[:i], txs.Scheduling[i+1:]...)
+			break
+		}
 	}
 
 	if txs.WriteTxID != "" || len(txs.ReadTxIDs) != 0 {
@@ -260,7 +355,8 @@ func setWriteTransaction(st *state.State, account, schemaName, id string) error 
 			op = "write"
 		}
 
-		return fmt.Errorf("cannot write confdb (%s/%s): a %s transaction is ongoing", account, schemaName, op)
+		// shouldn't happen save for programmer error
+		return fmt.Errorf("internal error: cannot write confdb (%s/%s): a %s transaction is ongoing", account, schemaName, op)
 	}
 
 	txs.WriteTxID = id
@@ -301,16 +397,35 @@ func getOngoingTxs(st *state.State, account, schemaName string) (ongoingTxs *con
 			st.Set("confdb-ongoing-txs", confdbTxs)
 		}
 
-		st.Cache(cacheKeyPrefix+ref, ongoingTxs.pending)
+		if len(ongoingTxs.Pending) == 0 {
+			st.Cache(pendingCachePrefix+ref, nil)
+		} else {
+			st.Cache(pendingCachePrefix+ref, ongoingTxs.Pending)
+		}
+
+		if len(ongoingTxs.Scheduling) == 0 {
+			st.Cache(schedulingCachePrefix+ref, nil)
+		} else {
+			st.Cache(schedulingCachePrefix+ref, ongoingTxs.Scheduling)
+		}
 	}
 
-	cached := st.Cached(cacheKeyPrefix + ref)
+	cached := st.Cached(pendingCachePrefix + ref)
 	if cached != nil {
-		queue, ok := cached.([]pendingAccess)
+		queue, ok := cached.([]access)
 		if !ok {
 			return nil, nil, fmt.Errorf("internal error: cannot access confdb pending transaction queue")
 		}
-		confdbTxs[ref].pending = queue
+		confdbTxs[ref].Pending = queue
+	}
+
+	cached = st.Cached(schedulingCachePrefix + ref)
+	if cached != nil {
+		queue, ok := cached.([]access)
+		if !ok {
+			return nil, nil, fmt.Errorf("internal error: cannot access confdb scheduling list")
+		}
+		confdbTxs[ref].Scheduling = queue
 	}
 
 	return confdbTxs[ref], updateTxStateFunc, nil
@@ -336,37 +451,51 @@ func unsetOngoingTransaction(st *state.State, account, schemaName, id string) er
 		}
 	}
 
-	if len(txs.ReadTxIDs) > 0 {
-		// there are other transactions running (can only be reads) so skip this.
-		// The last one will unblock the next access
-		return nil
-	}
-
-	// unblock any waiting routine
-	if len(txs.pending) > 0 {
-		logger.Debugf("remove pending access %s", txs.pending[0].ID)
-		close(txs.pending[0].WaitChan)
+	// if there are other transactions running, skip this. The last one will
+	// unblock the next access
+	if len(txs.ReadTxIDs) == 0 {
+		maybeUnblockAccesses(txs)
 	}
 
 	return nil
 }
 
-func unblockNextAccess(st *state.State, account, schemaName string) error {
-	txs, updateTxStateFunc, err := getOngoingTxs(st, account, schemaName)
-	if err != nil {
-		return err
+// maybeUnblockAccesses unblocks as many consecutive pending accesses as
+// possible, either one write or one or more sequential reads.
+// This may be a no-op, if there are:
+//   - no pending changes (i.e., there's nothing to unblock)
+//   - changes running for other transactions - pending accesses would've been
+//     scheduled w/o waiting if they could (see waitForAccess) so any pending
+//     accesses are guaranteed to be incompatible.
+//   - accesses that have been unblocked but are still scheduling changes. If we
+//     unblocked accesses here, they would race with the ones already scheduling
+//
+// If accesses are unblocked, they're removed from the Pending list and put into
+// the Scheduling list so we can track unblocked but still unscheduled accesses.
+func maybeUnblockAccesses(txs *confdbTransactions) {
+	if len(txs.Pending) == 0 || txs.WriteTxID != "" || len(txs.ReadTxIDs) > 0 || len(txs.Scheduling) != 0 {
+		return
 	}
 
-	if len(txs.pending) == 0 {
-		return nil
+	var upTo int
+	for i, acc := range txs.Pending {
+		if acc.AccessType == writeAccess {
+			if i == 0 {
+				acc.WaitChan <- struct{}{}
+				logger.Debugf("unblocking pending %s access %s", acc.AccessType, acc.ID)
+				upTo = i
+			}
+
+			break
+		}
+
+		acc.WaitChan <- struct{}{}
+		logger.Debugf("unblocking pending %s access %s", acc.AccessType, acc.ID)
+		upTo = i
 	}
 
-	// unblock any waiting routine
-	logger.Debugf("remove pending access %s", txs.pending[0].ID)
-	close(txs.pending[0].WaitChan)
-
-	updateTxStateFunc(txs)
-	return nil
+	txs.Scheduling = append([]access{}, txs.Pending[:upTo+1]...)
+	txs.Pending = txs.Pending[upTo+1:]
 }
 
 func (m *ConfdbManager) noop(*state.Task, *tomb.Tomb) error { return nil }

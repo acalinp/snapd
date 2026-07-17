@@ -30,6 +30,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 
 	_ "golang.org/x/crypto/sha3"
 	"gopkg.in/tomb.v2"
@@ -38,6 +39,7 @@ import (
 	"github.com/snapcore/snapd/asserts/sysdb"
 	"github.com/snapcore/snapd/boot"
 	"github.com/snapcore/snapd/bootloader"
+	"github.com/snapcore/snapd/client"
 	"github.com/snapcore/snapd/dirs"
 	"github.com/snapcore/snapd/gadget"
 	"github.com/snapcore/snapd/gadget/device"
@@ -58,6 +60,7 @@ import (
 	"github.com/snapcore/snapd/snap"
 	"github.com/snapcore/snapd/snap/snapfile"
 	"github.com/snapcore/snapd/snapdtool"
+	"github.com/snapcore/snapd/sysconfig"
 	"github.com/snapcore/snapd/systemd"
 	"github.com/snapcore/snapd/timings"
 )
@@ -85,6 +88,7 @@ var (
 	fdestateGenerateRecoveryKey          = fdestate.GenerateRecoveryKey
 
 	installLogicPrepareRunSystemData = installLogic.PrepareRunSystemData
+	copyInstallModeHostname          = copyInstallModeHostnameImpl
 )
 
 func writeLogs(rootdir string, fromMode string) error {
@@ -196,6 +200,32 @@ func writeTimings(st *state.State, rootdir, fromMode string) error {
 
 	if err := gz.Flush(); err != nil {
 		return fmt.Errorf("cannot flush timings output: %v", err)
+	}
+
+	return nil
+}
+
+func copyInstallModeHostnameImpl(rootdir string) error {
+	hostnamePath := filepath.Join(dirs.GlobalRootDir, "etc/hostname")
+	hostnameBytes, err := os.ReadFile(hostnamePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("cannot read install-mode hostname: %v", err)
+	}
+
+	hostname := strings.TrimSpace(string(hostnameBytes))
+	if hostname == "" {
+		return nil
+	}
+
+	targetHostnamePath := sysconfig.WritableDefaultsDir(rootdir, "etc/writable/hostname")
+	if err := os.MkdirAll(filepath.Dir(targetHostnamePath), 0755); err != nil {
+		return err
+	}
+	if err := osutil.AtomicWriteFile(targetHostnamePath, []byte(hostname+"\n"), 0644, 0); err != nil {
+		return fmt.Errorf("cannot write install-mode hostname: %v", err)
 	}
 
 	return nil
@@ -343,7 +373,13 @@ func (m *DeviceManager) doSetupRunSystem(t *state.Task, _ *tomb.Tomb) error {
 		KernelMods:          kBootInfo.BootableKMods,
 	}
 	timings.Run(perfTimings, "boot-make-runnable", "Make target system runnable", func(timings.Measurer) {
-		err = bootMakeRunnable(deviceCtx.Model(), bootWith, trustedInstallObserver)
+		if trustedInstallObserver != nil {
+			err = bootMakeRunnable(deviceCtx.Model(), bootWith,
+				trustedInstallObserver.BootAssets(),
+				trustedInstallObserver.EncryptionSetup())
+		} else {
+			err = bootMakeRunnable(deviceCtx.Model(), bootWith, nil, nil)
+		}
 	})
 	if err != nil {
 		return fmt.Errorf("cannot make system runnable: %v", err)
@@ -409,6 +445,10 @@ func (m *DeviceManager) doRestartSystemToRunMode(t *state.Task, _ *tomb.Tomb) er
 		if err := sd.DaemonReload(); err != nil {
 			return err
 		}
+	}
+
+	if err := copyInstallModeHostname(boot.InstallHostWritableDir(model)); err != nil {
+		return err
 	}
 
 	// ensure the next boot goes into run mode
@@ -673,7 +713,13 @@ func (m *DeviceManager) doFactoryResetRunSystem(t *state.Task, _ *tomb.Tomb) err
 		KernelMods:          kBootInfo.BootableKMods,
 	}
 	timings.Run(perfTimings, "boot-make-runnable", "Make target system runnable", func(timings.Measurer) {
-		err = bootMakeRunnableAfterDataReset(deviceCtx.Model(), bootWith, trustedInstallObserver)
+		if trustedInstallObserver != nil {
+			err = bootMakeRunnableAfterDataReset(deviceCtx.Model(), bootWith,
+				trustedInstallObserver.BootAssets(),
+				trustedInstallObserver.EncryptionSetup())
+		} else {
+			err = bootMakeRunnableAfterDataReset(deviceCtx.Model(), bootWith, nil, nil)
+		}
 	})
 	if err != nil {
 		return fmt.Errorf("cannot make system runnable: %v", err)
@@ -1195,6 +1241,21 @@ func (m *DeviceManager) doInstallFinish(t *state.Task, _ *tomb.Tomb) error {
 		}
 	}
 
+	// Carry any install-time extra snapd kernel command line fragments
+	// (e.g. keyboard configuration) into the boot configuration.
+	var extraSnapdKernelCommandLineFragments map[string]string
+	if encryptSetupData != nil {
+		extraSnapdKernelCommandLineFragments = encryptSetupData.ExtraSnapdKernelCommandLineFragments()
+	}
+	// Persist the install-time extra snapd kernel command line fragments to
+	// the installed system's ubuntu-save device dir so they can be lazily loaded
+	// into state at runtime and kept as a record of the install-time choices.
+	if len(extraSnapdKernelCommandLineFragments) > 0 {
+		if err := writeInstallTimeExtraSnapdFragments(boot.InstallHostDeviceSaveDir, extraSnapdKernelCommandLineFragments); err != nil {
+			return err
+		}
+	}
+
 	bootWith := &boot.BootableSet{
 		Base:              snapInfos[snap.TypeBase],
 		BasePath:          snapSeeds[snap.TypeBase].Path,
@@ -1206,6 +1267,8 @@ func (m *DeviceManager) doInstallFinish(t *state.Task, _ *tomb.Tomb) error {
 
 		RecoverySystemLabel: systemLabel,
 		KernelMods:          kBootInfo.BootableKMods,
+
+		ExtraSnapdKernelCommandLineAppend: renderExtraSnapdKernelCommandLineFragments(extraSnapdKernelCommandLineFragments),
 	}
 
 	// installs in system-seed{,-null} partition: grub.cfg, grubenv
@@ -1247,7 +1310,12 @@ func (m *DeviceManager) doInstallFinish(t *state.Task, _ *tomb.Tomb) error {
 	}
 
 	logger.Debugf("making the installed system runnable for system label %s", systemLabel)
-	if err := bootMakeRunnableStandalone(systemAndSnaps.Model, bootWith, trustedInstallObserver, st.Unlocker()); err != nil {
+	if err := bootMakeRunnableStandalone(
+		systemAndSnaps.Model,
+		bootWith,
+		trustedInstallObserver.BootAssets(),
+		trustedInstallObserver.EncryptionSetup(),
+		st.Unlocker()); err != nil {
 		return err
 	}
 
@@ -1353,6 +1421,21 @@ func (m *DeviceManager) doInstallSetupStorageEncryption(t *state.Task, _ *tomb.T
 		}
 	}
 
+	extraSnapdKernelCommandLineFragments := make(map[string]string)
+
+	// Convert the install-time keyboard configuration (if any) into extra
+	// snapd kernel command line fragments to be carried through encryption
+	// setup data.
+	var keyboardConfig *client.KeyboardConfig
+	if err := t.Get("keyboard-config", &keyboardConfig); err != nil && !errors.Is(err, state.ErrNoState) {
+		return err
+	}
+	if keyboardConfig != nil {
+		xkbConfig := keyboardConfig.XKBConfig()
+		fragmentID := string(extraSnapdKernelCommandLineFragmentXKB)
+		extraSnapdKernelCommandLineFragments[fragmentID] = xkbConfig.KernelCommandLineFragment()
+	}
+
 	systemAndSeeds, mntPtForType, _, unmount, err := m.loadAndMountSystemLabelSnapsUnlock(
 		st, systemLabel, []snap.Type{snap.TypeSnapd, snap.TypeKernel, snap.TypeBase, snap.TypeGadget})
 	if err != nil {
@@ -1420,6 +1503,7 @@ func (m *DeviceManager) doInstallSetupStorageEncryption(t *state.Task, _ *tomb.T
 		systemAndSeeds.Model,
 		mntPtForType[snap.TypeGadget],
 		mntPtForType[snap.TypeKernel],
+		extraSnapdKernelCommandLineFragments,
 		perfTimings,
 	)
 	if err != nil {

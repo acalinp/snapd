@@ -217,12 +217,6 @@ func MockSbReadSealedKeyObjectFromFile(f func(string) (*sb_tpm2.SealedKeyObject,
 	}
 }
 
-func MockSbTPMDictionaryAttackLockReset(f func(tpm *sb_tpm2.Connection, lockContext tpm2.ResourceContext, lockContextAuthSession tpm2.SessionContext, sessions ...tpm2.SessionContext) error) (restore func()) {
-	restore = testutil.Backup(&sbTPMDictionaryAttackLockReset)
-	sbTPMDictionaryAttackLockReset = f
-	return restore
-}
-
 func MockSbLockoutAuthSet(f func(tpm *sb_tpm2.Connection) bool) (restore func()) {
 	restore = testutil.Backup(&lockoutAuthSet)
 	lockoutAuthSet = f
@@ -542,7 +536,7 @@ func NewKeyData(kd *sb.KeyData) KeyData {
 	return &keyData{kd: kd}
 }
 
-func MockResealKeysWithFDESetupHook(f func(keys []KeyDataLocation, primaryKeyDevices []string, fallbackPrimaryKeyFiles []string, verifyPrimaryKey func([]byte), models []ModelForSealing, bootModes []string) error) (restore func()) {
+func MockResealKeysWithFDESetupHook(f func(keys []KeyDataLocation, primaryKeyDevices []string, fallbackPrimaryKeyFiles []string, verifyPrimaryKey func([]byte), models []ModelForSealing, bootModes []string, dryRun bool) error) (restore func()) {
 	return testutil.Mock(&resealKeysWithFDESetupHook, f)
 }
 
@@ -600,4 +594,12 @@ func MockSbWithExternalUnlockKey(f func(name string, key sb.DiskUnlockKey, src s
 
 func MockSbWithAuthRequestorUserVisibleName(f func(name string) sb.ActivateOption) (restore func()) {
 	return testutil.Mock(&sbWithAuthRequestorUserVisibleName, f)
+}
+
+func MockTPMResetDictionaryAttackLockWithAuthValue(f func(tpm *sb_tpm2.Connection, lockoutAuthValue []byte) error) (restore func()) {
+	return testutil.Mock(&sbTPMResetDictionaryAttackLockWithAuthValue, f)
+}
+
+func MockTPMResetDictionaryAttackLock(f func(tpm *sb_tpm2.Connection, lockoutAuthData []byte) error) (restore func()) {
+	return testutil.Mock(&sbTPMResetDictionaryAttackLock, f)
 }

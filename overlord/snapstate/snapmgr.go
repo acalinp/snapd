@@ -87,10 +87,10 @@ type SnapManager struct {
 
 	preseed bool
 
-	ensuredMountsUpdated       bool
-	ensuredDesktopFilesUpdated bool
-	ensuredDownloadsCleaned    bool
-	ensureStoreCacheCleanNext  time.Time
+	ensuredMountsUpdated        bool
+	ensuredDesktopFilesUpdated  bool
+	ensuredDownloadsCleanedNext time.Time
+	ensureStoreCacheCleanNext   time.Time
 
 	changeCallbackID int
 }
@@ -822,7 +822,6 @@ func Manager(st *state.State, runner *state.TaskRunner) (*SnapManager, error) {
 		preseed:                    preseed,
 		ensuredMountsUpdated:       false,
 		ensuredDesktopFilesUpdated: false,
-		ensuredDownloadsCleaned:    false,
 	}
 	if preseed {
 		m.backend = backend.NewForPreseedMode()
@@ -849,7 +848,7 @@ func Manager(st *state.State, runner *state.TaskRunner) (*SnapManager, error) {
 	// remove anything that is not referenced anymore
 	runner.AddHandler("prerequisites", m.doPrerequisites, nil)
 	runner.AddHandler("prepare-snap", m.doPrepareSnap, m.undoPrepareSnap)
-	runner.AddHandler("download-snap", m.doDownloadSnap, m.undoPrepareSnap)
+	runner.AddHandler("download-snap", m.doDownloadSnap, m.undoDownloadSnap)
 	runner.AddHandler("mount-snap", m.doMountSnap, m.undoMountSnap)
 	runner.AddHandler("unlink-current-snap", m.doUnlinkCurrentSnap, m.undoUnlinkCurrentSnap)
 	runner.AddHandler("copy-snap-data", m.doCopySnapData, m.undoCopySnapData)
@@ -898,6 +897,9 @@ func Manager(st *state.State, runner *state.TaskRunner) (*SnapManager, error) {
 
 	// component tasks
 	runner.AddHandler("prepare-component", m.doPrepareComponent, nil)
+	// TODO: add undo handler for download-component similar to
+	// undoDownloadSnap to clean up potentially corrupted component
+	// blobs (SNAPDENG-36484)
 	runner.AddHandler("download-component", m.doDownloadComponent, nil)
 	runner.AddHandler("mount-component", m.doMountComponent, m.undoMountComponent)
 	runner.AddHandler("unlink-current-component", m.doUnlinkCurrentComponent, m.undoUnlinkCurrentComponent)
@@ -1601,10 +1603,6 @@ func (m *SnapManager) ensureDownloadsCleaned() error {
 	m.state.Lock()
 	defer m.state.Unlock()
 
-	if m.ensuredDownloadsCleaned {
-		return nil
-	}
-
 	// only run after we are seeded
 	var seeded bool
 	err := m.state.Get("seeded", &seeded)
@@ -1615,13 +1613,19 @@ func (m *SnapManager) ensureDownloadsCleaned() error {
 		return nil
 	}
 
+	now := timeNow()
+
+	if !m.ensuredDownloadsCleanedNext.IsZero() && m.ensuredDownloadsCleanedNext.After(now) {
+		return nil
+	}
+
 	logger.Trace("ensure", "manager", "SnapManager", "func", "ensureDownloadsCleaned")
 
 	if err := cleanDownloads(m.state); err != nil {
 		return err
 	}
 
-	m.ensuredDownloadsCleaned = true
+	m.ensuredDownloadsCleanedNext = now.Add(maxUnusedDownloadRetention / 4)
 
 	return nil
 }

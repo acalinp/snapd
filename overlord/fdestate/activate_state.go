@@ -22,14 +22,17 @@ import (
 	"errors"
 	"os"
 
+	"github.com/snapcore/snapd/asserts"
 	"github.com/snapcore/snapd/boot"
 	"github.com/snapcore/snapd/logger"
+	"github.com/snapcore/snapd/overlord/install"
 	"github.com/snapcore/snapd/overlord/state"
 	"github.com/snapcore/snapd/secboot"
 )
 
 var (
-	bootLoadDiskUnlockState = boot.LoadDiskUnlockState
+	bootLoadDiskUnlockState   = boot.LoadDiskUnlockState
+	installLoadPreinstallInfo = install.LoadPreinstallInfo
 )
 
 var errNoActivateState = errors.New("snap-bootstrap did not provide an activation state")
@@ -86,18 +89,62 @@ func RunningWithPlatformKeys(status FDEStatus) bool {
 	return status == FDEStatusDegraded || status == FDEStatusActive
 }
 
+// FDEPreinstallInfo is json serializable data captured at install time.
+type FDEPreinstallInfo struct {
+	// Requirements lists encryption support requirements detected at install-time.
+	Requirements []install.EncryptionSupportRequirement `json:"requirements"`
+
+	// AcceptedErrors maps accepted preinstall check error kinds to optional metadata.
+	// Values are currently nil but can be extended later with arguments for
+	// future proofing.
+	AcceptedErrors map[string]any `json:"accepted-errors"`
+}
+
 // FDESystemState is json serializable disk encryption state for the
 // current boot.
 type FDESystemState struct {
 	// Status gives a summary on whether encrypted disks have been
 	// activated and whether any recovery key was used.
 	Status FDEStatus `json:"status"`
+
+	// AutoRepairResult is the status of the auto-repair attempt
+	AutoRepairResult AutoRepairResult `json:"auto-repair-result"`
+
+	// Preinstall provides information captured during install-time checks.
+	Preinstall FDEPreinstallInfo `json:"preinstall"`
 }
 
 // SystemState returns a json serializable FDE state of the booted
 // system.
-func SystemState(st *state.State) (*FDESystemState, error) {
-	ret := &FDESystemState{}
+func SystemState(st *state.State, model *asserts.Model) (*FDESystemState, error) {
+	ret := &FDESystemState{
+		Preinstall: FDEPreinstallInfo{
+			Requirements:   []install.EncryptionSupportRequirement{},
+			AcceptedErrors: map[string]any{},
+		},
+	}
+
+	preinstallInfo, err := installLoadPreinstallInfo()
+	if err != nil {
+		return nil, err
+	}
+	requirements := preinstallInfo.Requirements()
+	if len(requirements) != 0 {
+		ret.Preinstall.Requirements = requirements
+	}
+	for _, errKind := range preinstallInfo.AcceptedErrors {
+		ret.Preinstall.AcceptedErrors[errKind] = nil
+	}
+
+	repairResult, err := getRepairAttemptResult(st)
+	if err != nil {
+		return nil, err
+	}
+	if repairResult == nil {
+		ret.AutoRepairResult = AutoRepairNotInitialized
+	} else {
+		ret.AutoRepairResult = repairResult.Result
+	}
 
 	s, err := getActivateState(st)
 	if err == errNoActivateState {
@@ -113,10 +160,19 @@ func SystemState(st *state.State) (*FDESystemState, error) {
 		// unlocked.json does not exist, we are in either case:
 		//  * classic with kernel from deb.
 		//  * hybrid/core where snap-bootstrap is too old.
-		ret.Status = FDEStatusIndeterminate
-		// New classic version will still not support this,
-		// so we should be a bit more quiet.
-		logger.Debugf("while reading activate state: %v", err)
+		if model == nil {
+			// If the model is not yet available, they will have to request it again
+			logger.Debugf("activate state was not found, and the model is not set yet; the state will remain indeterminate until the model is set")
+			ret.Status = FDEStatusIndeterminate
+		} else if model.Classic() && !model.HybridClassic() {
+			// This expected that no activate state file
+			// is found. And we know in that case we never
+			// use platform-protected (i.e. TPM backed) encryption.
+			ret.Status = FDEStatusInactive
+		} else {
+			logger.Noticef("WARNING: activate state not found")
+			ret.Status = FDEStatusIndeterminate
+		}
 		return ret, nil
 	} else if err != nil {
 		// Unexpected errors should fail explicitly.

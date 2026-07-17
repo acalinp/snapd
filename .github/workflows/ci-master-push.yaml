@@ -33,7 +33,7 @@ jobs:
           ln -s packaging/ubuntu-16.04 debian
           sudo apt build-dep -d -y ${{ github.workspace }}
           # for indent
-          sudo apt install texinfo autopoint
+          sudo apt install -y texinfo autopoint
 
     - name: Copy dependencies
       run: |
@@ -154,7 +154,7 @@ jobs:
         merge-multiple: true
 
     - name: Upload coverage to Codecov
-      uses: codecov/codecov-action@v5
+      uses: codecov/codecov-action@v6
       # uploading to codecov occasionally fails, so continue running the test
       # workflow regardless of the upload
       continue-on-error: true

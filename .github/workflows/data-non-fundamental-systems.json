@@ -4,8 +4,7 @@
         "runs-on": "['self-hosted', 'spread-enabled']",
         "group": "amazon-linux",
         "backend": "openstack",
-        "alternative-backend": "google-distro-1",
-        "systems": "amazon-linux-2-64 amazon-linux-2023-64",
+        "systems": "amazon-linux-2023-64",
         "tasks": "tests/...",
         "rules": "main"
       },
@@ -13,7 +12,6 @@
         "runs-on": "['self-hosted', 'spread-enabled']",
         "group": "centos",
         "backend": "openstack",
-        "alternative-backend": "google-distro-2",
         "systems": "centos-9-64",
         "tasks": "tests/...",
         "rules": "main"
@@ -22,7 +20,6 @@
         "runs-on": "['self-hosted', 'spread-enabled']",
         "group": "debian-not-req",
         "backend": "openstack",
-        "alternative-backend": "google-distro-1",
         "systems": "debian-sid-64",
         "tasks": "tests/...",
         "rules": "main"
@@ -31,8 +28,7 @@
         "runs-on": "['self-hosted', 'spread-enabled']",
         "group": "fedora",
         "backend": "openstack",
-        "systems": "fedora-42-64",
-        "alternative-backend": "openstack",
+        "systems": "fedora-44-64",
         "tasks": "tests/...",
         "rules": "main"
       },
@@ -40,16 +36,14 @@
         "runs-on": "['self-hosted', 'spread-enabled']",
         "group": "opensuse",
         "backend": "openstack",
-        "alternative-backend": "google-distro-2",
-        "systems": "opensuse-15.6-64 opensuse-16.0-64 opensuse-tumbleweed-64 opensuse-tumbleweed-selinux-64",
+        "systems": "opensuse-16.0-64 opensuse-tumbleweed-64 opensuse-tumbleweed-selinux-64",
         "tasks": "tests/...",
         "rules": "main"
       },
       {
         "runs-on": "['self-hosted', 'spread-enabled']",
         "group": "ubuntu-trusty",
-        "backend": "google",
-        "alternative-backend": "google",
+        "backend": "openstack",
         "systems": "ubuntu-14.04-64",
         "tasks": "tests/smoke/ tests/main/canonical-livepatch tests/main/canonical-livepatch-14.04",
         "rules": "trusty"
@@ -58,7 +52,6 @@
         "runs-on": "['self-hosted', 'spread-enabled']",
         "group": "ubuntu-xenial-bionic",
         "backend": "openstack",
-        "alternative-backend": "google",
         "systems": "ubuntu-16.04-64 ubuntu-18.04-64",
         "tasks": "tests/...",
         "rules": "main"
@@ -67,17 +60,7 @@
         "runs-on": "['self-hosted', 'spread-enabled']",
         "group": "ubuntu-jammy",
         "backend": "openstack",
-        "alternative-backend": "google",
         "systems": "ubuntu-22.04-64",
-        "tasks": "tests/...",
-        "rules": "main"
-      },
-      {
-        "runs-on": "['self-hosted', 'spread-enabled']",
-        "group": "ubuntu-daily",
-        "backend": "openstack",
-        "alternative-backend": "google",
-        "systems": "ubuntu-26.04-64",
         "tasks": "tests/...",
         "rules": "main"
       },
@@ -85,7 +68,6 @@
         "runs-on": "['self-hosted', 'spread-enabled']",
         "group": "ubuntu-core-22",
         "backend": "openstack",
-        "alternative-backend": "google-core",
         "systems": "ubuntu-core-22-64",
         "tasks": "tests/...",
         "rules": "main"
@@ -94,7 +76,6 @@
         "runs-on": "['self-hosted', 'spread-enabled']",
         "group": "ubuntu-core-26",
         "backend": "openstack",
-        "alternative-backend": "google-core",
         "systems": "ubuntu-core-26-64",
         "tasks": "tests/...",
         "rules": "main"
@@ -103,7 +84,6 @@
         "runs-on": "['self-hosted', 'spread-enabled']",
         "group": "ubuntu-arm64",
         "backend": "openstack-arm",
-        "alternative-backend": "google-arm",
         "systems": "ubuntu-24.04-arm-64 ubuntu-core-24-arm-64",
         "tasks": "tests/...",
         "rules": "main"
@@ -111,17 +91,15 @@
       {
         "runs-on": "['self-hosted', 'spread-enabled']",
         "group": "ubuntu-secboot",
-        "backend": "google",
-        "alternative-backend": "google",
-        "systems": "ubuntu-secboot-20.04-64",
+        "backend": "openstack",
+        "systems": "ubuntu-secboot-24.04-64",
         "tasks": "tests/...",
         "rules": "main"
       },
       {
         "runs-on": "['self-hosted', 'spread-enabled']",
         "group": "ubuntu-fips-snap",
-        "backend": "google-pro",
-        "alternative-backend": "google-pro",
+        "backend": "openstack",
         "systems": "ubuntu-fips-22.04-64 ubuntu-fips-24.04-64",
         "tasks": "tests/fips-snap/...",
         "rules": "fips"
@@ -129,8 +107,7 @@
       {
         "runs-on": "['self-hosted', 'spread-enabled']",
         "group": "ubuntu-fips-deb",
-        "backend": "google-pro",
-        "alternative-backend": "google-pro",
+        "backend": "openstack",
         "systems": "ubuntu-fips-22.04-64 ubuntu-fips-24.04-64",
         "tasks": "tests/fips-deb/...",
         "rules": "fips"
@@ -139,16 +116,14 @@
         "runs-on": "['self-hosted', 'spread-enabled']",
         "group": "ubuntu-deb",
         "backend": "openstack",
-        "alternative-backend": "google",
         "systems": "ubuntu-24.04-64",
         "tasks": "tests/...",
         "rules": "main"
       },
       {
         "runs-on": "['self-hosted', 'spread-enabled']",
-        "group": "ubuntu-interim (fundamental)",
+        "group": "ubuntu-interim",
         "backend": "openstack",
-        "alternative-backend": "google",
         "systems": "ubuntu-25.10-64",
         "tasks": "tests/...",
         "rules": "main"
@@ -157,7 +132,6 @@
         "runs-on": "['ubuntu-latest']",
         "group": "jammy (garden)",
         "backend": "garden",
-        "alternative-backend": "google",
         "systems": "ubuntu-22.04-64",
         "tasks": "tests/main/apparmor-prompting-integration-tests tests/main/interfaces-requests-activates-handlers tests/main/microk8s-smoke tests/main/download-timeout tests/main/snap-network-errors tests/main/snapd-snap:lxd tests/main/apparmor-prompting-support tests/main/proxy",
         "rules": ""
@@ -166,7 +140,6 @@
         "runs-on": "['ubuntu-latest']",
         "group": "ubuntu-core-18 (garden)",
         "backend": "garden",
-        "alternative-backend": "google-core",
         "systems": "ubuntu-core-18-64",
         "tasks": "tests/core/auto-refresh-backoff-after-reboot:kernel tests/core/failover:emptyinitrd tests/core/gadget-kernel-refs-update-pc tests/core/kernel-base-gadget-pair-single-reboot-failover tests/core/kernel-base-gadget-pair-single-reboot tests/core/kernel-base-gadget-single-reboot tests/core/kernel-base-gadget-single-reboot-failover tests/main/microk8s-smoke tests/main/download-timeout tests/main/snap-network-errors tests/main/snapd-snap:lxd tests/main/apparmor-prompting-support tests/main/proxy",
         "rules": ""
@@ -175,7 +148,6 @@
         "runs-on": "['ubuntu-latest']",
         "group": "ubuntu-core-24 (garden)",
         "backend": "garden",
-        "alternative-backend": "google-core",
         "systems": "ubuntu-core-24-64",
         "tasks": "tests/main/microk8s-smoke tests/main/download-timeout tests/main/snap-network-errors tests/main/snapd-snap:lxd tests/main/apparmor-prompting-support tests/main/proxy",
         "rules": ""
@@ -184,7 +156,6 @@
         "runs-on": "['ubuntu-latest']",
         "group": "focal (garden)",
         "backend": "garden",
-        "alternative-backend": "google",
         "systems": "ubuntu-20.04-64",
         "tasks": "tests/main/microk8s-smoke tests/main/download-timeout tests/main/snap-network-errors tests/main/snapd-snap:lxd tests/main/apparmor-prompting-support tests/main/proxy",
         "rules": ""
@@ -193,17 +164,15 @@
         "runs-on": "['ubuntu-latest']",
         "group": "questing (garden)",
         "backend": "garden",
-        "alternative-backend": "google",
         "systems": "ubuntu-25.10-64",
         "tasks": "tests/main/microk8s-smoke tests/main/download-timeout tests/main/snap-network-errors tests/main/snapd-snap:lxd tests/main/apparmor-prompting-support tests/main/proxy",
         "rules": ""
       },
       {
         "runs-on": "['ubuntu-latest']",
-        "group": "fedora-42 (garden)",
+        "group": "fedora-44 (garden)",
         "backend": "garden",
-        "alternative-backend": "google",
-        "systems": "fedora-42-64",
+        "systems": "fedora-44-64",
         "tasks": "tests/main/microk8s-smoke tests/main/download-timeout tests/main/snap-network-errors tests/main/snapd-snap:lxd tests/main/apparmor-prompting-support tests/main/proxy",
         "rules": ""
       }
