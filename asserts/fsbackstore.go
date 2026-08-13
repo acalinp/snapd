@@ -38,18 +38,28 @@ const (
 )
 
 type filesystemBackstore struct {
-	top string
-	mu  sync.RWMutex
+	registry *Registry
+	top      string
+	mu       sync.RWMutex
 }
 
 // OpenFSBackstore opens a filesystem backed assertions backstore under path.
 func OpenFSBackstore(path string) (Backstore, error) {
+	return defaultRegistry.OpenFSBackstore(path)
+}
+
+// OpenFSBackstore opens a filesystem backed assertions backstore under path
+// using the registry to decode stored assertions.
+func (r *Registry) OpenFSBackstore(path string) (Backstore, error) {
 	top := filepath.Join(path, assertionsRoot)
 	err := ensureTop(top)
 	if err != nil {
 		return nil, err
 	}
-	return &filesystemBackstore{top: top}, nil
+	return &filesystemBackstore{
+		registry: r,
+		top:      top,
+	}, nil
 }
 
 // guarantees that result assertion is of the expected type (both in the AssertionType and go type sense)
@@ -61,7 +71,7 @@ func (fsbs *filesystemBackstore) readAssertion(assertType *AssertionType, diskPr
 	if err != nil {
 		return nil, fmt.Errorf("broken assertion storage, cannot read assertion: %v", err)
 	}
-	assert, err := Decode(encoded)
+	assert, err := fsbs.registry.Decode(encoded)
 	if err != nil {
 		return nil, fmt.Errorf("broken assertion storage, cannot decode assertion: %v", err)
 	}

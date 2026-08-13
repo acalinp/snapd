@@ -44,6 +44,17 @@ const (
 	jsonBody
 )
 
+// Assembler validates type-specific assertion data and returns its concrete
+// assertion representation.
+type Assembler func(assert AssertionBase) (Assertion, error)
+
+// TypeDefinition describes an externally owned assertion type.
+type TypeDefinition struct {
+	Name       string
+	PrimaryKey []string
+	Assembler  Assembler
+}
+
 // MetaHeaders is a list of headers in assertions which are about the assertion
 // itself.
 var MetaHeaders = [...]string{
@@ -73,20 +84,61 @@ type AssertionType struct {
 	// forming types.
 	OptionalPrimaryKeyDefaults map[string]string
 
-	assembler func(assert assertionBase) (Assertion, error)
+	assembler Assembler
 	flags     typeFlags
 }
 
-func (at *AssertionType) validate() {
+// NewAssertionType creates an assertion type from definition.
+func NewAssertionType(definition TypeDefinition) (*AssertionType, error) {
+	if definition.Name == "" {
+		return nil, fmt.Errorf("assertion type name cannot be empty")
+	}
+	if definition.Assembler == nil {
+		return nil, fmt.Errorf(
+			"assertion type %q must define an assembler",
+			definition.Name,
+		)
+	}
+
+	assertionType := &AssertionType{
+		Name:       definition.Name,
+		PrimaryKey: append([]string(nil), definition.PrimaryKey...),
+		assembler:  definition.Assembler,
+	}
+	err := assertionType.validate()
+	if err != nil {
+		return nil, err
+	}
+	return assertionType, nil
+}
+
+func (at *AssertionType) validate() error {
+	if at.flags&sequenceForming != 0 && len(at.PrimaryKey) == 0 {
+		return fmt.Errorf(
+			"assertion type %q cannot be sequence forming without a "+
+				"primary key",
+			at.Name,
+		)
+	}
 	if len(at.OptionalPrimaryKeyDefaults) != 0 && at.flags&sequenceForming != 0 {
-		panic(fmt.Sprintf("assertion type %q cannot be both sequence forming and have optional primary keys", at.Name))
+		return fmt.Errorf(
+			"assertion type %q cannot be both sequence forming and have "+
+				"optional primary keys",
+			at.Name,
+		)
 	}
 	noptional := 0
 	for _, k := range at.PrimaryKey {
 		defl := at.OptionalPrimaryKeyDefaults[k]
 		if noptional > 0 {
 			if defl == "" {
-				panic(fmt.Sprintf("assertion type %q primary key header %q has no default, optional primary keys must be a proper suffix of the primary key", at.Name, k))
+				return fmt.Errorf(
+					"assertion type %q primary key header %q has no "+
+						"default, optional primary keys must be a "+
+						"proper suffix of the primary key",
+					at.Name,
+					k,
+				)
 			}
 		}
 		if defl != "" {
@@ -94,8 +146,13 @@ func (at *AssertionType) validate() {
 		}
 	}
 	if len(at.OptionalPrimaryKeyDefaults) != noptional {
-		panic(fmt.Sprintf("assertion type %q has defaults values for unknown primary key headers", at.Name))
+		return fmt.Errorf(
+			"assertion type %q has defaults values for unknown primary "+
+				"key headers",
+			at.Name,
+		)
 	}
+	return nil
 }
 
 // MaxSupportedFormat returns the maximum supported format iteration for the type.
@@ -164,51 +221,61 @@ var (
 	ResponseMessageType      = &AssertionType{"response-message", []string{"account-id", "message-id", "device"}, nil, assembleResponseMessage, noAuthority}
 )
 
-var typeRegistry = map[string]*AssertionType{
-	AccountType.Name:              AccountType,
-	AccountKeyType.Name:           AccountKeyType,
-	ModelType.Name:                ModelType,
-	SerialType.Name:               SerialType,
-	BaseDeclarationType.Name:      BaseDeclarationType,
-	SnapDeclarationType.Name:      SnapDeclarationType,
-	SnapBuildType.Name:            SnapBuildType,
-	SnapRevisionType.Name:         SnapRevisionType,
-	SnapDeveloperType.Name:        SnapDeveloperType,
-	SystemUserType.Name:           SystemUserType,
-	ValidationType.Name:           ValidationType,
-	ValidationSetType.Name:        ValidationSetType,
-	RepairType.Name:               RepairType,
-	StoreType.Name:                StoreType,
-	PreseedType.Name:              PreseedType,
-	SnapResourceRevisionType.Name: SnapResourceRevisionType,
-	SnapResourcePairType.Name:     SnapResourcePairType,
-	ConfdbSchemaType.Name:         ConfdbSchemaType,
-	ClusterType.Name:              ClusterType,
-	RequestMessageType.Name:       RequestMessageType,
-	HardwareIdentityType.Name:     HardwareIdentityType,
+var snapdAssertionTypes = []*AssertionType{
+	ModelType,
+	SerialType,
+	BaseDeclarationType,
+	SnapDeclarationType,
+	SnapBuildType,
+	SnapRevisionType,
+	SnapDeveloperType,
+	SystemUserType,
+	ValidationType,
+	ValidationSetType,
+	RepairType,
+	StoreType,
+	PreseedType,
+	SnapResourceRevisionType,
+	SnapResourcePairType,
+	ConfdbSchemaType,
+	ClusterType,
+	RequestMessageType,
+	HardwareIdentityType,
 	// no authority
-	DeviceSessionRequestType.Name: DeviceSessionRequestType,
-	SerialRequestType.Name:        SerialRequestType,
-	AccountKeyRequestType.Name:    AccountKeyRequestType,
-	ConfdbControlType.Name:        ConfdbControlType,
-	ResponseMessageType.Name:      ResponseMessageType,
+	DeviceSessionRequestType,
+	SerialRequestType,
+	AccountKeyRequestType,
+	ConfdbControlType,
+	ResponseMessageType,
 }
 
-// Type returns the AssertionType with name or nil
+var trustCatalog = mustNewCatalog(AccountType, AccountKeyType)
+
+// TrustCatalog returns the foundational account and account-key catalog.
+func TrustCatalog() *Catalog {
+	return trustCatalog
+}
+
+var snapdCatalog = mustNewCatalog(snapdAssertionTypes...)
+
+// SnapdCatalog returns the assertion types owned by snapd.
+func SnapdCatalog() *Catalog {
+	return snapdCatalog
+}
+
+var defaultRegistry = mustNewRegistryFromCatalogs(
+	trustCatalog,
+	snapdCatalog,
+)
+
+// Type returns the AssertionType with name or nil.
 func Type(name string) *AssertionType {
-	return typeRegistry[name]
+	return defaultRegistry.Type(name)
 }
 
 // TypeNames returns a sorted list of known assertion type names.
 func TypeNames() []string {
-	names := make([]string, 0, len(typeRegistry))
-	for k := range typeRegistry {
-		names = append(names, k)
-	}
-
-	sort.Strings(names)
-
-	return names
+	return defaultRegistry.TypeNames()
 }
 
 var maxSupportedFormat = map[string]int{}
@@ -232,8 +299,11 @@ func init() {
 	// 1: support for constraints
 	maxSupportedFormat[AccountKeyType.Name] = 1
 
-	for _, at := range typeRegistry {
-		at.validate()
+	for _, at := range defaultRegistry.types {
+		err := at.validate()
+		if err != nil {
+			panic(err)
+		}
 	}
 }
 
@@ -272,12 +342,17 @@ var formatAnalyzer = map[*AssertionType]func(headers map[string]any, body []byte
 // and corresponding max supported format if it is >= min. Typical
 // usage passes 1 or 0 for min.
 func MaxSupportedFormats(min int) (maxFormats map[string]int) {
+	return defaultRegistry.MaxSupportedFormats(min)
+}
+
+// MaxSupportedFormats returns supported formats for the registry.
+func (r *Registry) MaxSupportedFormats(min int) (maxFormats map[string]int) {
 	if min == 0 {
-		maxFormats = make(map[string]int, len(typeRegistry))
+		maxFormats = make(map[string]int, len(r.types))
 	} else {
 		maxFormats = make(map[string]int)
 	}
-	for name := range typeRegistry {
+	for name := range r.types {
 		m := maxSupportedFormat[name]
 		if m >= min {
 			maxFormats[name] = m
@@ -588,10 +663,14 @@ type customSigner interface {
 // MediaType is the media type for encoded assertions on the wire.
 const MediaType = "application/x.ubuntu.assertion"
 
-// assertionBase is the concrete base to hold representation data for actual assertions.
-type assertionBase struct {
-	headers map[string]any
-	body    []byte
+// AssertionBase holds the common immutable representation of an assertion.
+//
+// Concrete assertion types defined by catalogs can embed AssertionBase and
+// add type-specific parsed fields and behavior.
+type AssertionBase struct {
+	assertType *AssertionType
+	headers    map[string]any
+	body       []byte
 	// parsed format iteration
 	format int
 	// parsed revision
@@ -602,41 +681,43 @@ type assertionBase struct {
 	signature []byte
 }
 
+type assertionBase = AssertionBase
+
 // HeaderString retrieves the string value of header with name or ""
-func (ab *assertionBase) HeaderString(name string) string {
+func (ab *AssertionBase) HeaderString(name string) string {
 	s, _ := ab.headers[name].(string)
 	return s
 }
 
 // Type returns the assertion type.
-func (ab *assertionBase) Type() *AssertionType {
-	return Type(ab.HeaderString("type"))
+func (ab *AssertionBase) Type() *AssertionType {
+	return ab.assertType
 }
 
 // Format returns the assertion format iteration.
-func (ab *assertionBase) Format() int {
+func (ab *AssertionBase) Format() int {
 	return ab.format
 }
 
 // SupportedFormat returns whether the assertion uses a supported
 // format iteration. If false the assertion might have been only
 // partially parsed.
-func (ab *assertionBase) SupportedFormat() bool {
-	return ab.format <= maxSupportedFormat[ab.HeaderString("type")]
+func (ab *AssertionBase) SupportedFormat() bool {
+	return ab.format <= ab.assertType.MaxSupportedFormat()
 }
 
 // Revision returns the assertion revision.
-func (ab *assertionBase) Revision() int {
+func (ab *AssertionBase) Revision() int {
 	return ab.revision
 }
 
 // AuthorityID returns the authority-id a.k.a the authority responsible for the assertion.
-func (ab *assertionBase) AuthorityID() string {
+func (ab *AssertionBase) AuthorityID() string {
 	return ab.HeaderString("authority-id")
 }
 
 // Header returns the value of an header by name.
-func (ab *assertionBase) Header(name string) any {
+func (ab *AssertionBase) Header(name string) any {
 	v := ab.headers[name]
 	if v == nil {
 		return nil
@@ -645,32 +726,32 @@ func (ab *assertionBase) Header(name string) any {
 }
 
 // Headers returns the complete headers.
-func (ab *assertionBase) Headers() map[string]any {
+func (ab *AssertionBase) Headers() map[string]any {
 	return copyHeaders(ab.headers)
 }
 
 // Body returns the body of the assertion.
-func (ab *assertionBase) Body() []byte {
+func (ab *AssertionBase) Body() []byte {
 	return ab.body
 }
 
 // Signature returns the signed content and its unprocessed signature.
-func (ab *assertionBase) Signature() (content, signature []byte) {
+func (ab *AssertionBase) Signature() (content, signature []byte) {
 	return ab.content, ab.signature
 }
 
 // SignKeyID returns the key id for the key that signed this assertion.
-func (ab *assertionBase) SignKeyID() string {
+func (ab *AssertionBase) SignKeyID() string {
 	return ab.HeaderString("sign-key-sha3-384")
 }
 
 // Prerequisites returns references to the prerequisite assertions for the validity of this one.
-func (ab *assertionBase) Prerequisites() []*Ref {
+func (ab *AssertionBase) Prerequisites() []*Ref {
 	return nil
 }
 
 // Ref returns a reference representing this assertion.
-func (ab *assertionBase) Ref() *Ref {
+func (ab *AssertionBase) Ref() *Ref {
 	assertType := ab.Type()
 	primKey := make([]string, len(assertType.PrimaryKey))
 	for i, name := range assertType.PrimaryKey {
@@ -683,12 +764,12 @@ func (ab *assertionBase) Ref() *Ref {
 }
 
 // At returns an AtRevision referencing this assertion at its revision.
-func (ab *assertionBase) At() *AtRevision {
+func (ab *AssertionBase) At() *AtRevision {
 	return &AtRevision{Ref: *ab.Ref(), Revision: ab.Revision()}
 }
 
 // expected interface is implemented
-var _ Assertion = (*assertionBase)(nil)
+var _ Assertion = (*AssertionBase)(nil)
 
 // Decode parses a serialized assertion.
 //
@@ -748,6 +829,11 @@ var _ Assertion = (*assertionBase)(nil)
 //
 // Times are expected to be in the RFC3339 format: "2006-01-02T15:04:05Z07:00".
 func Decode(serializedAssertion []byte) (Assertion, error) {
+	return defaultRegistry.Decode(serializedAssertion)
+}
+
+// Decode parses a serialized assertion using the registry.
+func (r *Registry) Decode(serializedAssertion []byte) (Assertion, error) {
 	// copy to get an independent backstorage that can't be mutated later
 	assertionSnapshot := make([]byte, len(serializedAssertion))
 	copy(assertionSnapshot, serializedAssertion)
@@ -775,7 +861,7 @@ func Decode(serializedAssertion []byte) (Assertion, error) {
 		return nil, fmt.Errorf("parsing assertion headers: %v", err)
 	}
 
-	return assemble(headers, body, content, signature)
+	return r.assemble(headers, body, content, signature)
 }
 
 // Maximum assertion component sizes.
@@ -787,6 +873,7 @@ const (
 
 // Decoder parses a stream of assertions bundled by separating them with double newlines.
 type Decoder struct {
+	registry       *Registry
 	rd             io.Reader
 	initialBufSize int
 	b              *bufio.Reader
@@ -809,8 +896,14 @@ const defaultDecoderBufSize = 4096
 
 // NewDecoder returns a Decoder to parse the stream of assertions from the reader.
 func NewDecoder(r io.Reader) *Decoder {
+	return defaultRegistry.NewDecoder(r)
+}
+
+// NewDecoder returns a Decoder using the registry.
+func (r *Registry) NewDecoder(reader io.Reader) *Decoder {
 	return (&Decoder{
-		rd:                 r,
+		registry:           r,
+		rd:                 reader,
 		initialBufSize:     defaultDecoderBufSize,
 		maxHeadersSize:     MaxHeadersSize,
 		maxSigSize:         MaxSignatureSize,
@@ -820,8 +913,21 @@ func NewDecoder(r io.Reader) *Decoder {
 
 // NewDecoderWithTypeMaxBodySize returns a Decoder to parse the stream of assertions from the reader enforcing optional per type max body sizes or the default one as fallback.
 func NewDecoderWithTypeMaxBodySize(r io.Reader, typeMaxBodySize map[*AssertionType]int) *Decoder {
+	return defaultRegistry.NewDecoderWithTypeMaxBodySize(
+		r,
+		typeMaxBodySize,
+	)
+}
+
+// NewDecoderWithTypeMaxBodySize returns a Decoder using the registry and
+// enforcing optional per-type maximum body sizes.
+func (r *Registry) NewDecoderWithTypeMaxBodySize(
+	reader io.Reader,
+	typeMaxBodySize map[*AssertionType]int,
+) *Decoder {
 	return (&Decoder{
-		rd:                 r,
+		registry:           r,
+		rd:                 reader,
 		initialBufSize:     defaultDecoderBufSize,
 		maxHeadersSize:     MaxHeadersSize,
 		maxSigSize:         MaxSignatureSize,
@@ -906,7 +1012,7 @@ func (d *Decoder) Decode() (Assertion, error) {
 	}
 
 	typeStr, _ := headers["type"].(string)
-	typ := Type(typeStr)
+	typ := d.registry.Type(typeStr)
 
 	length, err := checkIntWithDefault(headers, "body-length", 0)
 	if err != nil {
@@ -968,7 +1074,7 @@ func (d *Decoder) Decode() (Assertion, error) {
 	finalSig := make([]byte, len(sig))
 	copy(finalSig, sig)
 
-	return assemble(headers, finalBody, finalContent, finalSig)
+	return d.registry.assemble(headers, finalBody, finalContent, finalSig)
 }
 
 func checkIteration(headers map[string]any, name string) (int, error) {
@@ -992,11 +1098,21 @@ func checkRevision(headers map[string]any) (int, error) {
 
 // Assemble assembles an assertion from its components.
 func Assemble(headers map[string]any, body, content, signature []byte) (Assertion, error) {
+	return defaultRegistry.Assemble(headers, body, content, signature)
+}
+
+// Assemble assembles an assertion from its components using the registry.
+func (r *Registry) Assemble(
+	headers map[string]any,
+	body []byte,
+	content []byte,
+	signature []byte,
+) (Assertion, error) {
 	err := checkHeaders(headers)
 	if err != nil {
 		return nil, err
 	}
-	return assemble(headers, body, content, signature)
+	return r.assemble(headers, body, content, signature)
 }
 
 func checkAuthority(_ *AssertionType, headers map[string]any) error {
@@ -1043,8 +1159,12 @@ func checkJSON(assertType *AssertionType, body []byte) (err error) {
 	return nil
 }
 
-// assemble is the internal variant of Assemble, assumes headers are already checked for supported types
-func assemble(headers map[string]any, body, content, signature []byte) (Assertion, error) {
+func (r *Registry) assemble(
+	headers map[string]any,
+	body []byte,
+	content []byte,
+	signature []byte,
+) (Assertion, error) {
 	length, err := checkIntWithDefault(headers, "body-length", 0)
 	if err != nil {
 		return nil, fmt.Errorf("assertion: %v", err)
@@ -1067,7 +1187,7 @@ func assemble(headers map[string]any, body, content, signature []byte) (Assertio
 	if err != nil {
 		return nil, fmt.Errorf("assertion: %v", err)
 	}
-	assertType := Type(typ)
+	assertType := r.Type(typ)
 	if assertType == nil {
 		return nil, fmt.Errorf("unknown assertion type: %q", typ)
 	}
@@ -1114,25 +1234,75 @@ func assemble(headers map[string]any, body, content, signature []byte) (Assertio
 	}
 
 	assert, err := assertType.assembler(assertionBase{
-		headers:   headers,
-		body:      body,
-		format:    formatnum,
-		revision:  revision,
-		content:   content,
-		signature: signature,
+		assertType: assertType,
+		headers:    headers,
+		body:       body,
+		format:     formatnum,
+		revision:   revision,
+		content:    content,
+		signature:  signature,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("assertion %s: %v", assertType.Name, err)
 	}
+	err = checkAssembledAssertion(assert, assertType)
+	if err != nil {
+		return nil, err
+	}
 	return assert, nil
+}
+
+func checkAssembledAssertion(
+	assert Assertion,
+	assertionType *AssertionType,
+) error {
+	if assert == nil {
+		return fmt.Errorf(
+			"internal error: assembler for assertion type %q returned nil",
+			assertionType.Name,
+		)
+	}
+	actualType := assert.Type()
+	if actualType == assertionType {
+		return nil
+	}
+	actualName := "<nil>"
+	if actualType != nil {
+		actualName = actualType.Name
+	}
+	return fmt.Errorf(
+		"internal error: assembler for assertion type %q returned "+
+			"assertion of type %q",
+		assertionType.Name,
+		actualName,
+	)
 }
 
 func writeHeader(buf *bytes.Buffer, headers map[string]any, name string) {
 	appendEntry(buf, fmt.Sprintf("%s:", name), headers[name], 0)
 }
 
-func assembleAndSign(assertType *AssertionType, headers map[string]any, body []byte, privKey PrivateKey) (Assertion, error) {
-	err := checkAssertType(assertType)
+func assembleAndSign(
+	assertType *AssertionType,
+	headers map[string]any,
+	body []byte,
+	privKey PrivateKey,
+) (Assertion, error) {
+	return defaultRegistry.assembleAndSign(
+		assertType,
+		headers,
+		body,
+		privKey,
+	)
+}
+
+func (r *Registry) assembleAndSign(
+	assertType *AssertionType,
+	headers map[string]any,
+	body []byte,
+	privKey PrivateKey,
+) (Assertion, error) {
+	err := r.checkAssertType(assertType)
 	if err != nil {
 		return nil, err
 	}
@@ -1282,25 +1452,46 @@ func assembleAndSign(assertType *AssertionType, headers map[string]any, body []b
 	signature = append(signature, '\n')
 
 	assert, err := assertType.assembler(assertionBase{
-		headers:   finalHeaders,
-		body:      finalBody,
-		format:    formatnum,
-		revision:  revision,
-		content:   content,
-		signature: signature,
+		assertType: assertType,
+		headers:    finalHeaders,
+		body:       finalBody,
+		format:     formatnum,
+		revision:   revision,
+		content:    content,
+		signature:  signature,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("cannot assemble assertion %s: %v", assertType.Name, err)
+	}
+	err = checkAssembledAssertion(assert, assertType)
+	if err != nil {
+		return nil, err
 	}
 	return assert, nil
 }
 
 // SignWithoutAuthority assembles an assertion without a set authority with the provided information and signs it with the given private key.
 func SignWithoutAuthority(assertType *AssertionType, headers map[string]any, body []byte, privKey PrivateKey) (Assertion, error) {
+	return defaultRegistry.SignWithoutAuthority(
+		assertType,
+		headers,
+		body,
+		privKey,
+	)
+}
+
+// SignWithoutAuthority assembles and signs a no-authority assertion using the
+// registry.
+func (r *Registry) SignWithoutAuthority(
+	assertType *AssertionType,
+	headers map[string]any,
+	body []byte,
+	privKey PrivateKey,
+) (Assertion, error) {
 	if assertType.flags&noAuthority == 0 {
 		return nil, fmt.Errorf("cannot sign assertions needing a definite authority with SignWithoutAuthority")
 	}
-	return assembleAndSign(assertType, headers, body, privKey)
+	return r.assembleAndSign(assertType, headers, body, privKey)
 }
 
 // Encode serializes an assertion.

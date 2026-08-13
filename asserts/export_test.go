@@ -32,7 +32,7 @@ import (
 var NumAssertionType int
 
 func init() {
-	NumAssertionType = len(typeRegistry)
+	NumAssertionType = len(defaultRegistry.types)
 }
 
 // v1FixedTimestamp exposed for tests
@@ -53,6 +53,7 @@ var CompileOnClassicSystemConstraintForTest = compileOnClassicSystemConstraint
 // NewDecoderStressed makes a Decoder with a stressed setup with the given buffer and maximum sizes.
 func NewDecoderStressed(r io.Reader, bufSize, maxHeadersSize, maxBodySize, maxSigSize int) *Decoder {
 	return (&Decoder{
+		registry:           defaultRegistry,
 		rd:                 r,
 		initialBufSize:     bufSize,
 		maxHeadersSize:     maxHeadersSize,
@@ -64,6 +65,7 @@ func NewDecoderStressed(r io.Reader, bufSize, maxHeadersSize, maxBodySize, maxSi
 func BootstrapAccountForTest(authorityID string) *Account {
 	return &Account{
 		assertionBase: assertionBase{
+			assertType: AccountType,
 			headers: map[string]any{
 				"type":         "account",
 				"authority-id": authorityID,
@@ -82,6 +84,7 @@ func MakeAccountKeyForTest(authorityID string, openPGPPubKey PublicKey, since ti
 func MakeAccountKeyForTestWithUntil(authorityID string, openPGPPubKey PublicKey, since, until time.Time, validYears int) *AccountKey {
 	return &AccountKey{
 		assertionBase: assertionBase{
+			assertType: AccountKeyType,
 			headers: map[string]any{
 				"type":                "account-key",
 				"authority-id":        authorityID,
@@ -249,20 +252,26 @@ func assembleTestOnlyNoAuthorityPK(assert assertionBase) (Assertion, error) {
 var TestOnlyNoAuthorityPKType = &AssertionType{"test-only-no-authority-pk", []string{"pk"}, nil, assembleTestOnlyNoAuthorityPK, noAuthority}
 
 func init() {
-	typeRegistry[TestOnlyType.Name] = TestOnlyType
+	assertionTypes := defaultRegistry.assertionTypes()
+	assertionTypes = append(
+		assertionTypes,
+		TestOnlyType,
+		TestOnly2Type,
+		TestOnlyNoAuthorityType,
+		TestOnlyNoAuthorityPKType,
+		TestOnlyDeclType,
+		TestOnlyRevType,
+		TestOnlySeqType,
+	)
+	defaultRegistry = mustNewRegistry(assertionTypes...)
+
 	maxSupportedFormat[TestOnlyType.Name] = 1
-	typeRegistry[TestOnly2Type.Name] = TestOnly2Type
-	typeRegistry[TestOnlyNoAuthorityType.Name] = TestOnlyNoAuthorityType
-	typeRegistry[TestOnlyNoAuthorityPKType.Name] = TestOnlyNoAuthorityPKType
 	formatAnalyzer[TestOnlyType] = func(headers map[string]any, _ []byte) (int, error) {
 		if _, ok := headers["format-1-feature"]; ok {
 			return 1, nil
 		}
 		return 0, nil
 	}
-	typeRegistry[TestOnlyDeclType.Name] = TestOnlyDeclType
-	typeRegistry[TestOnlyRevType.Name] = TestOnlyRevType
-	typeRegistry[TestOnlySeqType.Name] = TestOnlySeqType
 	maxSupportedFormat[TestOnlySeqType.Name] = 2
 }
 

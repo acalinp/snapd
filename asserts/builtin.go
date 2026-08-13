@@ -105,11 +105,12 @@ func assembleBuiltinAssertion(assertType *AssertionType, headerBytes, body []byt
 	}
 
 	a, err := assertType.assembler(assertionBase{
-		headers:   h,
-		body:      body,
-		revision:  revision,
-		content:   content,
-		signature: builtinSignature,
+		assertType: assertType,
+		headers:    h,
+		body:       body,
+		revision:   revision,
+		content:    content,
+		signature:  builtinSignature,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("cannot assemble the builtin %s: %v", assertType.Name, err)

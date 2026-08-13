@@ -51,6 +51,14 @@ func checkNotEmptyString(headers map[string]any, name string) (string, error) {
 	return checkNotEmptyStringWhat(headers, name, "header")
 }
 
+// CheckNotEmptyString returns a mandatory non-empty string header.
+func CheckNotEmptyString(
+	headers map[string]any,
+	name string,
+) (string, error) {
+	return checkNotEmptyString(headers, name)
+}
+
 func checkNotEmptyStringWhat(m map[string]any, name, what string) (string, error) {
 	s, err := checkExistsStringWhat(m, name, what)
 	if err != nil {
@@ -89,23 +97,6 @@ func checkPrimaryKey(headers map[string]any, primKey string) (string, error) {
 	return value, nil
 }
 
-func checkAssertType(assertType *AssertionType) error {
-	if assertType == nil {
-		return fmt.Errorf("internal error: assertion type cannot be nil")
-	}
-	// validity check against known canonical
-	validity := typeRegistry[assertType.Name]
-	switch validity {
-	case assertType:
-		// fine, matches canonical
-		return nil
-	case nil:
-		return fmt.Errorf("internal error: unknown assertion type: %q", assertType.Name)
-	default:
-		return fmt.Errorf("internal error: unpredefined assertion type for name %q used (unexpected address %p)", assertType.Name, assertType)
-	}
-}
-
 // use 'defl' default if missing
 func checkIntWithDefault(headers map[string]any, name string, defl int) (int, error) {
 	value, ok := headers[name]
@@ -125,6 +116,25 @@ func checkIntWithDefault(headers map[string]any, name string, defl int) (int, er
 
 func checkInt(headers map[string]any, name string) (int, error) {
 	return checkIntWhat(headers, name, "header")
+}
+
+// CheckPositiveInt returns a mandatory integer header greater than zero.
+func CheckPositiveInt(
+	headers map[string]any,
+	name string,
+) (int, error) {
+	value, err := checkInt(headers, name)
+	if err != nil {
+		return 0, err
+	}
+	if value < 1 {
+		return 0, fmt.Errorf(
+			`%q header must be >=1: %d`,
+			name,
+			value,
+		)
+	}
+	return value, nil
 }
 
 func checkIntWhat(headers map[string]any, name, what string) (int, error) {
@@ -168,6 +178,14 @@ func checkRFC3339Date(headers map[string]any, name string) (time.Time, error) {
 	return checkRFC3339DateWhat(headers, name, "header")
 }
 
+// CheckRFC3339Date returns a mandatory RFC3339 timestamp header.
+func CheckRFC3339Date(
+	headers map[string]any,
+	name string,
+) (time.Time, error) {
+	return checkRFC3339Date(headers, name)
+}
+
 func checkRFC3339DateWhat(m map[string]any, name, what string) (time.Time, error) {
 	dateStr, err := checkNotEmptyStringWhat(m, name, what)
 	if err != nil {
@@ -200,6 +218,15 @@ func checkUint(headers map[string]any, name string, bitSize int) (uint64, error)
 	return checkUintWhat(headers, name, bitSize, "header")
 }
 
+// CheckUint returns a mandatory unsigned integer header.
+func CheckUint(
+	headers map[string]any,
+	name string,
+	bitSize int,
+) (uint64, error) {
+	return checkUint(headers, name, bitSize)
+}
+
 func checkUintWhat(headers map[string]any, name string, bitSize int, what string) (uint64, error) {
 	valueStr, err := checkNotEmptyStringWhat(headers, name, what)
 	if err != nil {
@@ -220,6 +247,15 @@ func checkUintWhat(headers map[string]any, name string, bitSize int, what string
 
 func checkDigest(headers map[string]any, name string, h crypto.Hash) (string, error) {
 	return checkDigestDecWhat(headers, name, h, base64.RawURLEncoding.DecodeString, "header")
+}
+
+// CheckDigest validates and returns a digest header.
+func CheckDigest(
+	headers map[string]any,
+	name string,
+	hash crypto.Hash,
+) (string, error) {
+	return checkDigest(headers, name, hash)
 }
 
 func checkDigestDecWhat(headers map[string]any, name string, h crypto.Hash, decode func(string) ([]byte, error), what string) (string, error) {

@@ -32,8 +32,9 @@ import (
 // Nothing will be committed if there are missing prerequisites, for a full
 // consistency check beforehand there is the Precheck option.
 type Batch struct {
-	bs    Backstore
-	added []Assertion
+	registry *Registry
+	bs       Backstore
+	added    []Assertion
 	// added is in prereq order
 	inPrereqOrder bool
 
@@ -45,6 +46,13 @@ type Batch struct {
 // unsupported can be used to ignore/log assertions with unsupported formats,
 // default behavior is to error on them.
 func NewBatch(unsupported func(u *Ref, err error) error) *Batch {
+	return defaultRegistry.NewBatch(unsupported)
+}
+
+// NewBatch creates a Batch using the registry.
+func (r *Registry) NewBatch(
+	unsupported func(u *Ref, err error) error,
+) *Batch {
 	if unsupported == nil {
 		unsupported = func(_ *Ref, err error) error {
 			return err
@@ -52,6 +60,7 @@ func NewBatch(unsupported func(u *Ref, err error) error) *Batch {
 	}
 
 	return &Batch{
+		registry:      r,
 		bs:            NewMemoryBackstore(),
 		inPrereqOrder: true, // empty list is trivially so
 		unsupported:   unsupported,
@@ -62,6 +71,10 @@ func NewBatch(unsupported func(u *Ref, err error) error) *Batch {
 func (b *Batch) Add(a Assertion) error {
 	b.inPrereqOrder = false
 
+	err := b.registry.checkAssertType(a.Type())
+	if err != nil {
+		return err
+	}
 	if !a.SupportedFormat() {
 		err := &UnsupportedFormatError{Ref: a.Ref(), Format: a.Format()}
 		return b.unsupported(a.Ref(), err)
@@ -85,7 +98,7 @@ func (b *Batch) AddStream(r io.Reader) ([]*Ref, error) {
 	b.inPrereqOrder = false
 
 	start := len(b.added)
-	dec := NewDecoder(r)
+	dec := b.registry.NewDecoder(r)
 	for {
 		a, err := dec.Decode()
 		if err == io.EOF {

@@ -507,10 +507,11 @@ func toHash(s string) crypto.Hash {
 	}
 }
 
-// IntegrityData holds information about integrity data of a specific type included in a snap or resource's revision.
+// IntegrityData holds information about integrity data included in an
+// artifact's revision.
 //
-// A single snap or resource revision can have multiple variants of integrity data which are represented as an array in the
-// snap or resource revision assertion.
+// An artifact revision can have multiple variants, represented as an array in
+// its revision assertion.
 type IntegrityData struct {
 	Type          string
 	Version       uint
@@ -821,6 +822,11 @@ func checkSnapIntegrity(headers map[string]any) ([]IntegrityData, error) {
 	}
 
 	return snapIntegrityDataList, nil
+}
+
+// CheckIntegrity validates and returns an optional integrity header.
+func CheckIntegrity(headers map[string]any) ([]IntegrityData, error) {
+	return checkSnapIntegrity(headers)
 }
 
 func assembleSnapRevision(assert assertionBase) (Assertion, error) {

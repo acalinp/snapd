@@ -255,6 +255,7 @@ type Checker func(assert Assertion, signingKey *AccountKey, roDB RODatabase, che
 // Database holds assertions and can be used to sign or check
 // further assertions.
 type Database struct {
+	registry   *Registry
 	bs         Backstore
 	keypairMgr KeypairManager
 
@@ -271,6 +272,11 @@ type Database struct {
 
 // OpenDatabase opens the assertion database based on the configuration.
 func OpenDatabase(cfg *DatabaseConfig) (*Database, error) {
+	return defaultRegistry.OpenDatabase(cfg)
+}
+
+// OpenDatabase opens an assertion database using the registry.
+func (r *Registry) OpenDatabase(cfg *DatabaseConfig) (*Database, error) {
 	bs := cfg.Backstore
 	keypairMgr := cfg.KeypairManager
 
@@ -284,6 +290,10 @@ func OpenDatabase(cfg *DatabaseConfig) (*Database, error) {
 	trustedBackstore := NewMemoryBackstore()
 
 	for _, a := range cfg.Trusted {
+		err := r.checkAssertType(a.Type())
+		if err != nil {
+			return nil, err
+		}
 		switch accepted := a.(type) {
 		case *AccountKey:
 			accKey := accepted
@@ -306,7 +316,11 @@ func OpenDatabase(cfg *DatabaseConfig) (*Database, error) {
 	otherPredefinedBackstore := NewMemoryBackstore()
 
 	for _, a := range cfg.OtherPredefined {
-		err := otherPredefinedBackstore.Put(a.Type(), a)
+		err := r.checkAssertType(a.Type())
+		if err != nil {
+			return nil, err
+		}
+		err = otherPredefinedBackstore.Put(a.Type(), a)
 		if err != nil {
 			return nil, fmt.Errorf("cannot predefine assertion %v: %v", a.Ref(), err)
 		}
@@ -320,6 +334,7 @@ func OpenDatabase(cfg *DatabaseConfig) (*Database, error) {
 	copy(dbCheckers, checkers)
 
 	return &Database{
+		registry:   r,
 		bs:         bs,
 		keypairMgr: keypairMgr,
 		trusted:    trustedBackstore,
@@ -346,6 +361,7 @@ func (db *Database) WithStackedBackstore(backstore Backstore) *Database {
 	backstores = append(backstores, backstore)
 	backstores = append(backstores, stackedOn...)
 	return &Database{
+		registry:   db.registry,
 		bs:         backstore,
 		keypairMgr: db.keypairMgr,
 		trusted:    db.trusted,
@@ -392,7 +408,7 @@ func (db *Database) Sign(assertType *AssertionType, headers map[string]any, body
 	if err != nil {
 		return nil, err
 	}
-	return assembleAndSign(assertType, headers, body, privKey)
+	return db.registry.assembleAndSign(assertType, headers, body, privKey)
 }
 
 // findAccountKey finds an AccountKey exactly with account id and key id.
@@ -435,6 +451,10 @@ func (db *Database) SetEarliestTime(earliest time.Time) {
 
 // Check tests whether the assertion is properly signed and consistent with all the stored knowledge.
 func (db *Database) Check(assert Assertion) error {
+	err := db.registry.checkAssertType(assert.Type())
+	if err != nil {
+		return err
+	}
 	if !assert.SupportedFormat() {
 		return &UnsupportedFormatError{Ref: assert.Ref(), Format: assert.Format()}
 	}
@@ -450,7 +470,6 @@ func (db *Database) Check(assert Assertion) error {
 	}
 
 	var accKey *AccountKey
-	var err error
 	if typ.flags&noAuthority == 0 {
 		// TODO: later may need to consider type of assert to find candidate keys
 		accKey, err = db.findAccountKey(assert.AuthorityID(), assert.SignKeyID())
@@ -522,7 +541,13 @@ func (db *Database) Add(assert Assertion) error {
 		if err != nil {
 			return fmt.Errorf("internal error: HeadersFromPrimaryKey for %q failed on prechecked data: %s", ref.Type.Name, ref.PrimaryKey)
 		}
-		cur, err := find(db.stackedOn, ref.Type, headers, -1)
+		cur, err := find(
+			db.registry,
+			db.stackedOn,
+			ref.Type,
+			headers,
+			-1,
+		)
 		if err == nil {
 			curRev := cur.Revision()
 			rev := assert.Revision()
@@ -547,8 +572,14 @@ func searchMatch(assert Assertion, expectedHeaders map[string]string) bool {
 	return true
 }
 
-func find(backstores []Backstore, assertionType *AssertionType, headers map[string]string, maxFormat int) (Assertion, error) {
-	err := checkAssertType(assertionType)
+func find(
+	registry *Registry,
+	backstores []Backstore,
+	assertionType *AssertionType,
+	headers map[string]string,
+	maxFormat int,
+) (Assertion, error) {
+	err := registry.checkAssertType(assertionType)
 	if err != nil {
 		return nil, err
 	}
@@ -591,14 +622,20 @@ func find(backstores []Backstore, assertionType *AssertionType, headers map[stri
 // their default values will be used.
 // It returns a NotFoundError if the assertion cannot be found.
 func (db *Database) Find(assertionType *AssertionType, headers map[string]string) (Assertion, error) {
-	return find(db.backstores, assertionType, headers, -1)
+	return find(db.registry, db.backstores, assertionType, headers, -1)
 }
 
 // FindMaxFormat finds an assertion like Find but such that its
 // format is <= maxFormat by passing maxFormat along to the backend.
 // It returns a NotFoundError if such an assertion cannot be found.
 func (db *Database) FindMaxFormat(assertionType *AssertionType, headers map[string]string, maxFormat int) (Assertion, error) {
-	return find(db.backstores, assertionType, headers, maxFormat)
+	return find(
+		db.registry,
+		db.backstores,
+		assertionType,
+		headers,
+		maxFormat,
+	)
 }
 
 // FindPredefined finds an assertion in the predefined sets (trusted
@@ -608,7 +645,13 @@ func (db *Database) FindMaxFormat(assertionType *AssertionType, headers map[stri
 // their default values will be used.
 // It returns a NotFoundError if the assertion cannot be found.
 func (db *Database) FindPredefined(assertionType *AssertionType, headers map[string]string) (Assertion, error) {
-	return find([]Backstore{db.trusted, db.predefined}, assertionType, headers, -1)
+	return find(
+		db.registry,
+		[]Backstore{db.trusted, db.predefined},
+		assertionType,
+		headers,
+		-1,
+	)
 }
 
 // FindTrusted finds an assertion in the trusted set based on arbitrary headers.
@@ -617,11 +660,17 @@ func (db *Database) FindPredefined(assertionType *AssertionType, headers map[str
 // their default values will be used.
 // It returns a NotFoundError if the assertion cannot be found.
 func (db *Database) FindTrusted(assertionType *AssertionType, headers map[string]string) (Assertion, error) {
-	return find([]Backstore{db.trusted}, assertionType, headers, -1)
+	return find(
+		db.registry,
+		[]Backstore{db.trusted},
+		assertionType,
+		headers,
+		-1,
+	)
 }
 
 func (db *Database) findMany(backstores []Backstore, assertionType *AssertionType, headers map[string]string) ([]Assertion, error) {
-	err := checkAssertType(assertionType)
+	err := db.registry.checkAssertType(assertionType)
 	if err != nil {
 		return nil, err
 	}
@@ -672,7 +721,7 @@ func (db *Database) FindManyPredefined(assertionType *AssertionType, headers map
 // unless maxFormat is -1.
 // It returns a NotFoundError if the assertion cannot be found.
 func (db *Database) FindSequence(assertType *AssertionType, sequenceHeaders map[string]string, after, maxFormat int) (SequenceMember, error) {
-	err := checkAssertType(assertType)
+	err := db.registry.checkAssertType(assertType)
 	if err != nil {
 		return nil, err
 	}
@@ -840,9 +889,18 @@ type consistencyChecker interface {
 	checkConsistency(roDB RODatabase, signingKey *AccountKey) error
 }
 
+// ConsistencyChecker is implemented by externally owned assertions that
+// perform checks against other assertions in a database.
+type ConsistencyChecker interface {
+	CheckConsistency(roDB RODatabase, signingKey *AccountKey) error
+}
+
 // CheckCrossConsistency verifies that the assertion is consistent with the other statements in the database.
 func CheckCrossConsistency(assert Assertion, signingKey *AccountKey, roDB RODatabase, checkTimeEarliest, checkTimeLatest time.Time) error {
 	// see if the assertion requires further checks
+	if checker, ok := assert.(ConsistencyChecker); ok {
+		return checker.CheckConsistency(roDB, signingKey)
+	}
 	if checker, ok := assert.(consistencyChecker); ok {
 		return checker.checkConsistency(roDB, signingKey)
 	}

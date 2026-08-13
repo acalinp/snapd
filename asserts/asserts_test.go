@@ -21,17 +21,36 @@ package asserts_test
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"strings"
 
 	. "gopkg.in/check.v1"
 
 	"github.com/snapcore/snapd/asserts"
+	"github.com/snapcore/snapd/asserts/assertstest"
 )
 
 type assertsSuite struct{}
 
 var _ = Suite(&assertsSuite{})
+
+type externalCatalogAssertion struct {
+	asserts.AssertionBase
+}
+
+func assembleExternalCatalogAssertion(
+	base asserts.AssertionBase,
+) (asserts.Assertion, error) {
+	return &externalCatalogAssertion{AssertionBase: base}, nil
+}
+
+func (a *externalCatalogAssertion) CheckConsistency(
+	_ asserts.RODatabase,
+	_ *asserts.AccountKey,
+) error {
+	return fmt.Errorf("external consistency check")
+}
 
 func (as *assertsSuite) TestType(c *C) {
 	c.Check(asserts.Type("test-only"), Equals, asserts.TestOnlyType)
@@ -40,6 +59,136 @@ func (as *assertsSuite) TestType(c *C) {
 func (as *assertsSuite) TestUnknown(c *C) {
 	c.Check(asserts.Type(""), IsNil)
 	c.Check(asserts.Type("unknown"), IsNil)
+}
+
+func (as *assertsSuite) TestExternalCatalog(c *C) {
+	externalType, err := asserts.NewAssertionType(asserts.TypeDefinition{
+		Name:       "external-test",
+		PrimaryKey: []string{"id"},
+		Assembler:  assembleExternalCatalogAssertion,
+	})
+	c.Assert(err, IsNil)
+
+	catalog, err := asserts.NewCatalog(externalType)
+	c.Assert(err, IsNil)
+	registry, err := asserts.NewRegistryFromCatalogs(
+		asserts.TrustCatalog(),
+		catalog,
+	)
+	c.Assert(err, IsNil)
+
+	privateKey, _ := assertstest.GenerateKey(752)
+	signingDB := assertstest.NewSigningDB("authority", privateKey)
+	account := assertstest.NewAccount(
+		signingDB,
+		"authority",
+		map[string]any{"account-id": "authority"},
+		"",
+	)
+	accountKey := assertstest.NewAccountKey(
+		signingDB,
+		account,
+		nil,
+		privateKey.PublicKey(),
+		"",
+	)
+
+	db, err := registry.OpenDatabase(&asserts.DatabaseConfig{
+		Trusted:  []asserts.Assertion{account, accountKey},
+		Checkers: []asserts.Checker{asserts.CheckCrossConsistency},
+	})
+	c.Assert(err, IsNil)
+	err = db.ImportKey(privateKey)
+	c.Assert(err, IsNil)
+
+	assertion, err := db.Sign(
+		externalType,
+		map[string]any{
+			"authority-id": "authority",
+			"id":           "one",
+		},
+		nil,
+		privateKey.PublicKey().ID(),
+	)
+	c.Assert(err, IsNil)
+	c.Check(assertion.Type(), Equals, externalType)
+	_, ok := assertion.(*externalCatalogAssertion)
+	c.Check(ok, Equals, true)
+
+	err = db.Check(assertion)
+	c.Check(err, ErrorMatches, "external consistency check")
+
+	encoded := asserts.Encode(assertion)
+	decoded, err := registry.Decode(encoded)
+	c.Assert(err, IsNil)
+	c.Check(decoded.Type(), Equals, externalType)
+
+	otherType, err := asserts.NewAssertionType(asserts.TypeDefinition{
+		Name:       "external-test",
+		PrimaryKey: []string{"id"},
+		Assembler:  assembleExternalCatalogAssertion,
+	})
+	c.Assert(err, IsNil)
+	otherCatalog, err := asserts.NewCatalog(otherType)
+	c.Assert(err, IsNil)
+	otherRegistry, err := asserts.NewRegistryFromCatalogs(otherCatalog)
+	c.Assert(err, IsNil)
+	otherAssertion, err := otherRegistry.Decode(encoded)
+	c.Assert(err, IsNil)
+	c.Check(otherAssertion.Type(), Equals, otherType)
+	c.Check(registry.Type("external-test"), Equals, externalType)
+
+	batch := registry.NewBatch(nil)
+	refs, err := batch.AddStream(bytes.NewReader(encoded))
+	c.Assert(err, IsNil)
+	c.Check(
+		refs,
+		DeepEquals,
+		[]*asserts.Ref{{Type: externalType, PrimaryKey: []string{"one"}}},
+	)
+
+	backstore, err := registry.OpenFSBackstore(c.MkDir())
+	c.Assert(err, IsNil)
+	err = backstore.Put(externalType, assertion)
+	c.Assert(err, IsNil)
+	stored, err := backstore.Get(externalType, []string{"one"}, 0)
+	c.Assert(err, IsNil)
+	c.Check(stored.Type(), Equals, externalType)
+	_, ok = stored.(*externalCatalogAssertion)
+	c.Check(ok, Equals, true)
+
+	_, err = asserts.Decode(encoded)
+	c.Check(err, ErrorMatches, `unknown assertion type: "external-test"`)
+}
+
+func (as *assertsSuite) TestCatalogComposition(c *C) {
+	snapdRegistry, err := asserts.NewRegistryFromCatalogs(
+		asserts.SnapdCatalog(),
+	)
+	c.Assert(err, IsNil)
+	c.Check(snapdRegistry.Type("account"), IsNil)
+	c.Check(snapdRegistry.Type("model"), Equals, asserts.ModelType)
+
+	registry, err := asserts.NewRegistryFromCatalogs(
+		asserts.TrustCatalog(),
+		asserts.SnapdCatalog(),
+	)
+	c.Assert(err, IsNil)
+	c.Check(registry.Type("account"), Equals, asserts.AccountType)
+	c.Check(registry.Type("model"), Equals, asserts.ModelType)
+	c.Check(registry.Type("test-only"), IsNil)
+}
+
+func (as *assertsSuite) TestNewRegistryRejectsDuplicateType(c *C) {
+	_, err := asserts.NewRegistry(
+		asserts.AccountType,
+		asserts.AccountType,
+	)
+	c.Check(
+		err,
+		ErrorMatches,
+		`cannot register duplicate assertion type "account"`,
+	)
 }
 
 func (as *assertsSuite) TestTypeMaxSupportedFormat(c *C) {
